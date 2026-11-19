@@ -45,7 +45,7 @@ def build_tool_schema(tools_catalogue: str) -> dict:
 
 def render_inbox(items: list[InboxItem], channels: dict | None = None) -> str:
     """Render inbox items. An item on a known channel gets its `→ Reply in:`
-    route and its tail; each channel's rules are appended once."""
+    route and its tail; each channel's guidance is appended once."""
     channels = channels or {}
     blocks: list[str] = []
     used: list = []
@@ -65,7 +65,7 @@ def render_inbox(items: list[InboxItem], channels: dict | None = None) -> str:
         blocks.append("\n".join(parts))
         if ch not in used:
             used.append(ch)
-    rules = [r for r in (ch.rules() for ch in used) if r]
+    rules = [g for g in (ch.guide() for ch in used) if g]
     return "\n\n".join(blocks + rules) or "(empty)"
 
 

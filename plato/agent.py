@@ -39,6 +39,7 @@ from plato.context import (
 from plato.events import Dispatched, Event, EventLog
 from plato.executor import Executor, StopRun
 from plato.model import Model
+from plato.should_respond import Policy
 from plato.tools import ToolRegistry, default_registry
 from plato.workspace import InboxItem, Workspace
 
@@ -98,6 +99,7 @@ class Agent:
         identity: str = "",
         channels: list | None = None,
         log: EventLog | None = None,
+        policy: Policy | None = None,
         agent_id: str = "agent",
         human_id: str = "user",
         on_reply: Callable[[str], None] | None = None,
@@ -129,6 +131,11 @@ class Agent:
             ch_tools = ch.tools()
             if ch_tools is not None:
                 self.registry.extend(ch_tools)
+        # The gate's rules: the base policy (chat by default), then each
+        # channel's rules for its own events. First match wins.
+        self.policy = (policy or Policy()).with_rules(
+            *(r for ch in self.channels.values() for r in ch.gate_rules))
+        self.log.set_policy(agent_id, self.policy)
         self.system_prompt = build_system_prompt(identity)
         self.tool_schema = build_tool_schema(self.registry.describe())
         # circuit-breaker state (in memory; a restart is a natural reset)
@@ -307,15 +314,16 @@ class Agent:
         picks the channel: 'chat', or the artifact type a channel handles."""
         channel = None
         if ev.reply_surface and ev.reply_surface != "chat":
-            channel = next((c for c in self.channels.values() if c.artifact_type == ev.reply_surface), None)
+            channel = next((c for c in self.channels.values() if ev.reply_surface in c.artifact_types), None)
         label = (channel.label(ev) if channel else None) or ev.payload.get("label") or _default_label(ev)
         meta = channel.meta(ev) if channel else {}
         ts = datetime.fromisoformat(ev.created_at).astimezone().strftime("%H:%M")
         return InboxItem(ev.event_id, ts, label, ev.text, channel.name if channel else None, meta)
 
     def _record_edit(self, path: str) -> None:
-        artifact = f"doc:{path}"
-        self.log.ensure_artifact(artifact, "doc")
+        """The agent's file writes go on the log as `edit` events on `file:<path>`."""
+        artifact = f"file:{path}"
+        self.log.ensure_artifact(artifact, "file")
         self.log.submit(artifact, actor_type="agent", actor_id=self.agent_id, surface="edit",
                         payload={"path": path})
 

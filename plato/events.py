@@ -1,6 +1,6 @@
 """The event log: one append-only record of everything every actor does.
 
-Every action — a person's chat message, a comment, an edit, a file landing, the
+Every action — a person's message, an edit, a file landing, a webhook, the
 agent's own replies — is an immutable event on one log. Everything else is
 derived from it:
 
@@ -10,11 +10,12 @@ derived from it:
                         `should_respond` gate → materialize the yeses into that
                         participant's inbox
     pending_inbox()     what a participant hasn't handled yet
-    recent()            the tail of one artifact (a thread, a document's comments)
+    recent()            the tail of one artifact's stream
 
-An **artifact** is anything events attach to: a chat thread, a document, an
-email conversation. It has a type, which the gate uses to decide where a
-response belongs.
+An **artifact** is anything events attach to: a chat thread, a file, an email
+conversation, a ticket. It has a type, which routes a response to the channel
+that handles that type. A **surface** is a free-form string naming what kind of
+event it is; the gate's rules give surfaces their meaning.
 
 SQLite (stdlib) keeps this a single file you can open and query. Several agents
 can share one log: each subscribes to the artifacts it follows.
@@ -118,10 +119,12 @@ def _now() -> str:
 
 
 class EventLog:
-    def __init__(self, path: str | Path, policy: Policy | None = None) -> None:
+    def __init__(self, path: str | Path) -> None:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.policy = policy or Policy()
+        # Each participant's gate policy (its rules). Several agents can share
+        # one log with different rules; unregistered participants get Policy().
+        self._policies: dict[str, Policy] = {}
         self._lock = threading.RLock()
         self._db = sqlite3.connect(self.path, check_same_thread=False, isolation_level=None)
         self._db.row_factory = sqlite3.Row
@@ -156,8 +159,8 @@ class EventLog:
         dropping a source-of-truth write is worse than a loud failure."""
         if actor_type not in ACTOR_TYPES:
             raise ValueError(f"actor_type must be one of {sorted(ACTOR_TYPES)}")
-        if surface not in self.policy.surfaces:
-            raise ValueError(f"unknown surface {surface!r}; known: {sorted(self.policy.surfaces)}")
+        if not surface or not isinstance(surface, str):
+            raise ValueError("surface must be a non-empty string (e.g. 'chat', 'comment', 'email')")
         event_id = "e" + uuid.uuid4().hex[:10]
         with self._lock:
             if self._db.execute("SELECT 1 FROM artifacts WHERE artifact_id=?", (artifact_id,)).fetchone() is None:
@@ -169,6 +172,13 @@ class EventLog:
                  json.dumps(payload or {}), _now()),
             )
         return self.get(event_id)
+
+    # ── participants ─────────────────────────────────────────────────────
+    def set_policy(self, participant_id: str, policy: Policy) -> None:
+        self._policies[participant_id] = policy
+
+    def policy_for(self, participant_id: str) -> Policy:
+        return self._policies.get(participant_id) or Policy()
 
     # ── subscriptions ────────────────────────────────────────────────────
     def subscribe(self, participant_id: str, artifact_id: str) -> None:
@@ -231,7 +241,7 @@ class EventLog:
                 view_type = ev.artifact_type or "unknown"
                 for pid in self.subscribers(ev.artifact_id):
                     decision = should_respond(
-                        Participant(pid), ev.as_gate_input(), ArtifactView(view_type, True), self.policy)
+                        Participant(pid), ev.as_gate_input(), ArtifactView(view_type, True), self.policy_for(pid))
                     out.append(Dispatched(ev, pid, decision))
                     if decision:
                         self._db.execute(

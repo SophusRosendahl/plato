@@ -18,40 +18,29 @@ guarantees, and nothing else.
 State is a folder of plain files (`memory.md`, `todo.md`, `daily_log.md`,
 `files/`, `traces/`) plus one SQLite event log, so you can watch the agent think.
 
-## The event log and the `should_respond` gate
+## Building blocks
 
-Everything that happens is an immutable event on one append-only log
-(`events.db`): a person's chat message, a comment, an edit, a file landing, and
-the agent's own replies, comments and edits. Events attach to **artifacts** (a
-chat thread, a document, an email conversation), and participants **subscribe**
-to artifacts.
+Plato's core knows nothing about comments, email, tickets or any other product
+concept. It gives you five blocks, and everything else is built from them.
+
+| Block | What it is |
+|---|---|
+| **Event log** (`EventLog`) | One append-only SQLite log. Every action by every actor (people, systems, the agent itself) is an immutable event on an **artifact** (anything events attach to: a file, an email thread, a ticket). A **surface** is a free-form string naming the kind of event. Participants **subscribe** to artifacts. |
+| **Gate** (`should_respond`, `Policy`, `Rule`) | A cheap, deterministic filter (no LLM) run for every subscriber before a wake is spent. Universal checks are fixed: not your own event, subscribed, visible, addressed to you. Then your ordered `Rule`s decide by surface, op and actor type whether to wake and where the answer goes. No matching rule means no wake. The only built-in rule is chat. Every decision carries a reason, written to the trace. |
+| **Inbox** | Derived from the log: the dispatcher turns gate yeses into inbox items. A wake marks done exactly what it showed the agent. |
+| **Channel** (`Channel`) | Owns one or more artifact types. It contributes gate rules for its events, tools to act there, a `→ Reply in:` hint, a context tail, and guidance text. When a wake is entirely channel-routed, the harness withholds chat `reply()`. |
+| **Tail parts** (`RecentEvents`, `PayloadField`, `FileReference`) | Composable, bounded context an event brings into the wake, such as the recent thread, a quoted passage, or a pointer to a file whose body is read on demand. |
 
 ```
-person/app ──submit──▶ event log ──dispatch──▶ should_respond(participant, event)
-                                                   │ no: logged, costs nothing
-                                                   ▼ yes: inbox item (+ reply surface)
-                                               agent wakes
+person / app / webhook ──submit──▶ event log ──dispatch──▶ gate (your rules)
+                                                              │ no: logged, costs nothing
+                                                              ▼ yes
+                                     inbox ──▶ wake: route to channel + tail + guidance
 ```
 
-`should_respond` is a cheap, deterministic, no-LLM pre-filter, run for every
-subscriber before a wake is spent:
-
-- never your own event
-- only if subscribed and visible
-- a chat message is answered in chat
-- a comment, mention or inbound message is answered on that artifact's channel
-- a person's edit doesn't wake (the agent isn't a reviewer of work in progress)
-- bookkeeping (`create`, `rename`, …) doesn't wake
-- an unknown surface never wakes
-
-Every decision carries a reason tag and lands in the trace. The branches that
-vary by product are parameters on `Policy`. Whether to actually respond, and
-how, stays the model's judgment.
-
-Because the agent's own words are on the log, the conversation is two-sided:
-every wake shows the recent conversation, so nothing depends on in-memory
-history surviving a restart. Several agents can share one log; each follows
-the artifacts it cares about.
+The agent's own replies and edits are on the log too, so each wake shows the
+recent conversation from both sides, and several agents can share one log (each
+with its own rules).
 
 ## Try it
 
@@ -86,34 +75,46 @@ agent.wake()
 The signature and first docstring line become the tool's entry in the catalogue
 the model sees. There is no schema to keep in sync.
 
-## Channels: inputs beyond chat
+## Recipes: building comments, email, …
 
-Chat is one way in. A comment on a document, an email, a webhook: each is a
-**channel**. An event on a channel brings three things into the wake beyond
-its own text:
-
-- **A reply route**: a `→ Reply in: comment(...)` line naming the call that
-  answers it. When a whole wake is routed to channels, chat `reply()` is
-  withheld by the harness, not just discouraged by the prompt.
-- **A tail of context**, bounded, built at wake time: for a comment, the quoted
-  passage, the recent thread ("most recent 6 of 14 comments"), and a reference
-  to the document (path + size; the body is read on demand).
-- **Channel rules**: a short prompt for how to behave there, rendered once.
+`examples/` builds real input types out of those blocks. `examples/comments.py`
+is the whole comments feature in about 60 lines:
 
 ```python
-from plato import Agent, CommentsChannel, OpenAICompatModel
+class Comments(Channel):
+    name = "comments"
+    artifact_types = ("file",)                         # comments attach to files
+    gate_rules = (Rule("comment", True),)               # a person's comment wakes the agent
+    guidance = GUIDANCE                                 # how to behave in a thread
 
-comments = CommentsChannel()
-agent = Agent("./workspace", OpenAICompatModel("gpt-4.1"), channels=[comments])
+    def __init__(self):
+        self.tail_parts = (
+            PayloadField("quote", "The comment refers to this passage:\n> {value}"),
+            RecentEvents(surfaces=("comment",), limit=6),  # the thread so far
+            FileReference("path"),                         # the file, read on demand
+        )
 
-# your app calls this when a person comments
-comments.post("launch-plan.md", "Design slipped a week. Move the date.",
-              quote="We ship on March 3.")
-agent.wake()   # agent answers with comment(...) in that thread and edits the file
+    def post(self, path, text, *, quote=None, parent_id=None):    # called by your app
+        return self.receive(f"file:{path}", "file", "comment", text,
+                            parent_id=parent_id, path=path, quote=quote)
+
+    def tools(self):                                    # comment(path, text, parent_id)
+        ...                                             # → self.act(...) records the reply
+
+    def reply_hint(self, item):
+        return f"comment(path={item.meta['path']!r}, text='...', parent_id={item.meta['thread_root']!r})"
 ```
 
-A new channel is a small subclass of `Channel` overriding `tools()`,
-`reply_hint()`, `tail()` and `rules()`; see `plato/channels.py`.
+```python
+comments = Comments()
+agent = Agent("./workspace", model, channels=[comments, EmailInbox()])
+comments.post("launch-plan.md", "Design slipped a week. Move the date.", quote="We ship on March 3.")
+agent.wake()   # answers in that comment thread (not chat) and edits the file
+```
+
+`examples/email_inbox.py` does the same for email (each correspondent is an
+artifact, so the thread tail is your history with that person). A new input
+type is one small `Channel` subclass.
 
 ## Spike caveats
 

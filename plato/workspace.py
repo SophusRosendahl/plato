@@ -46,7 +46,7 @@ class InboxItem:
     text: str
     # Where the event came from and where an answer belongs. None = chat.
     channel: str | None = None
-    # Channel-specific data (e.g. a comment's entity, thread id, quoted passage).
+    # Channel-specific data pulled off the event (ids, payload fields).
     meta: dict = field(default_factory=dict)
 
     def render(self) -> str:

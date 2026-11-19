@@ -1,163 +1,152 @@
-"""Channels: comment events, their context tail, reply routing, chat suppression."""
+"""The generic channel machinery, exercised with a throwaway channel defined here.
 
-from plato import Agent, ScriptedModel, ToolRegistry
-from plato.channels import Channel, CommentsChannel
+Nothing in this file depends on the recipes in examples/: if these pass, the
+building blocks work for any kind of input.
+"""
+
+from plato import (
+    Agent,
+    Channel,
+    FileReference,
+    PayloadField,
+    Policy,
+    RecentEvents,
+    Rule,
+    ScriptedModel,
+    ToolRegistry,
+)
+
+
+class Tickets(Channel):
+    """A minimal support-ticket channel: people add notes, the agent replies."""
+
+    name = "tickets"
+    artifact_types = ("ticket",)
+    gate_rules = (Rule("note", True, actor_type="human"),)
+    guidance = "--- tickets ---\nAnswer with note()."
+
+    def __init__(self, limit=6, max_chars=300):
+        self.tail_parts = (
+            PayloadField("priority", "Priority: {value}"),
+            RecentEvents(surfaces=("note",), limit=limit, max_chars=max_chars),
+            FileReference("attachment"),
+        )
+
+    def add(self, ticket, text, **payload):
+        return self.receive(f"ticket:{ticket}", "ticket", "note", text, ticket=ticket, **payload)
+
+    def tools(self):
+        reg = ToolRegistry()
+
+        @reg.tool(group="Tickets")
+        def note(ticket: str, text: str) -> str:
+            """Add a note to a ticket."""
+            self.act(f"ticket:{ticket}", "ticket", "note", text, ticket=ticket)
+            return "noted"
+        return reg
+
+    def reply_hint(self, item):
+        return f"note(ticket={item.meta['ticket']!r}, text='...')"
 
 
 def make(tmp_path, steps, **kw):
     model = ScriptedModel(steps)
-    comments = CommentsChannel(**kw)
-    agent = Agent(tmp_path / "ws", model, channels=[comments])
-    return agent, comments, model
+    tickets = Tickets(**kw)
+    return Agent(tmp_path / "ws", model, channels=[tickets]), tickets, model
 
 
-def wake_context(model, call=0):
+def ctx(model, call=0):
     return model.calls[call][1]["content"]
 
 
 def handled(agent):
-    """Dispatch and mark everything pending as seen, without running a wake."""
     agent.log.dispatch_once()
     agent.log.mark_done(agent.agent_id, {e.event_id for e in agent.log.pending_inbox(agent.agent_id)})
 
 
-def test_comment_lands_in_inbox_with_route_and_rules(tmp_path):
-    agent, comments, model = make(tmp_path, [
-        'comment("notes.md", "Fixed.", parent_id="x"); stop("answered comment")'])
-    (agent.ws.files / "notes.md").write_text("line one\nline two\n")
-    c = comments.post("notes.md", "Typo in line two?", quote="line two")
-    agent.wake()
-    ctx = wake_context(model)
-    assert f"→ Reply in: comment(entity='notes.md', text='...', parent_id='{c.event_id}')" in ctx
-    assert "Comment on notes.md: Typo in line two?" in ctx
-    assert "> line two" in ctx                                       # quoted passage
-    assert "Document: notes.md (18 chars, 3 lines)" in ctx             # reference, not body
-    assert "line one" not in ctx                                     # body is read on demand
-    assert ctx.count("--- how to answer comments ---") == 1
-    assert "Respond in the channel named" in ctx                     # channel footer
-
-
-def test_thread_tail_is_bounded_and_excludes_trigger(tmp_path):
-    agent, comments, model = make(tmp_path, ['comment("d.md", "ok"); stop("x")'],
-                                  max_thread=2, max_comment_chars=20)
-    root = comments.post("d.md", "first")
-    agent.log.submit("doc:d.md", actor_type="agent", actor_id="agent", surface="comment",
-                     parent_id=root.event_id, payload={"text": "agent answer", "entity": "d.md"})
-    comments.post("d.md", "a very long follow-up comment indeed", parent_id=root.event_id)
-    handled(agent)
-    comments.post("d.md", "and now?", parent_id=root.event_id)
-    agent.wake()
-    ctx = wake_context(model)
-    assert "most recent 2 of 3 comments" in ctx
-    assert "- You (" in ctx and "agent answer" in ctx
-    assert "a very long follow-…" in ctx                             # per-comment cap
-    assert "): first" not in ctx                                     # oldest dropped
-    assert ctx.count("and now?") == 1                                # trigger not repeated in tail
-    assert f"parent_id='{root.event_id}'" in ctx                     # replies go to thread root
-
-
-def test_agent_comment_lands_in_thread_and_does_not_rewake(tmp_path):
-    posted = {}
-    agent, comments, _ = make(tmp_path, [
-        lambda _: f'comment("d.md", "Will do.", parent_id={posted["id"]!r}); stop("x")'])
-    posted["id"] = comments.post("d.md", "please shorten").event_id
+def test_channel_event_is_routed_with_hint_tail_and_guidance(tmp_path):
+    agent, tickets, model = make(tmp_path, ['note("7", "Looking into it."); stop("x")'])
+    (agent.ws.files / "log.txt").write_text("a\nb\n")
+    tickets.add("7", "Login is broken", priority="high", attachment="log.txt")
     r = agent.wake()
-    assert r.outcome == "stopped"
-    thread = comments.thread("d.md")
-    assert [x.actor_type for x in thread] == ["human", "agent"]
-    assert thread[1].parent_id == posted["id"]
-    assert agent.pending_inbox() == []                               # its own comment didn't wake it
+    c = ctx(model)
+    assert "→ Reply in: note(ticket='7', text='...')" in c
+    assert "note on ticket:7: Login is broken" in c                  # default label
+    assert "Priority: high" in c                                     # PayloadField
+    assert "File: log.txt (4 chars, 3 lines)" in c                    # FileReference, body not inlined
+    assert c.count("--- tickets ---") == 1                           # guidance once
+    assert "Respond in the channel named" in c                       # channel footer
+    assert r.outcome == "stopped" and r.steps == 1                    # act() counts as answering
+
+
+def test_no_rule_no_wake_even_with_a_channel(tmp_path):
+    agent, tickets, _ = make(tmp_path, [])
+    tickets.receive("ticket:7", "ticket", "edit", "renamed title")
+    assert agent.wake() is None
+
+
+def test_recent_events_is_bounded_and_excludes_trigger(tmp_path):
+    agent, tickets, model = make(tmp_path, ['note("7", "ok"); stop("x")'], limit=2, max_chars=20)
+    tickets.add("7", "first")
+    agent.log.submit("ticket:7", actor_type="agent", actor_id="agent", surface="note",
+                     payload={"text": "agent answer", "ticket": "7"})
+    tickets.add("7", "a very long follow-up note indeed")
+    handled(agent)
+    tickets.add("7", "and now?")
+    agent.wake()
+    c = ctx(model)
+    assert "most recent 2 of 3" in c
+    assert "- You (" in c and "agent answer" in c
+    assert "a very long follow-…" in c                               # per-event cap
+    assert "): first" not in c                                       # oldest dropped
+    assert c.count("and now?") == 1                                  # trigger not repeated
+
+
+def test_agent_action_does_not_rewake(tmp_path):
+    agent, tickets, _ = make(tmp_path, ['note("7", "done"); stop("x")'])
+    tickets.add("7", "please fix")
+    agent.wake()
+    assert [e.actor_type for e in agent.log.recent("ticket:7")] == ["human", "agent"]
+    assert agent.pending_inbox() == []
 
 
 def test_chat_reply_is_withheld_on_a_channel_wake(tmp_path):
-    agent, comments, model = make(tmp_path, [
-        'reply("Answered in chat by mistake")',
-        'comment("d.md", "Answered here."); stop("x")',
-    ])
-    comments.post("d.md", "question?")
+    agent, tickets, model = make(tmp_path, ['reply("in chat by mistake")', 'note("7", "here"); stop("x")'])
+    tickets.add("7", "question?")
     r = agent.wake()
-    assert r.replies == []                                           # nothing reached chat
-    tool_out = [m["content"] for m in model.calls[1] if m["role"] == "tool"][-1]
-    assert "not delivered" in tool_out
-    kinds = [ln.split('"kind": "')[1].split('"')[0] for ln in r.trace_path.read_text().splitlines()]
-    assert "reply_suppressed" in kinds and "channel_reply" in kinds
-    assert all(e.actor_type == "human" for e in agent.log.recent(agent.thread))  # nothing logged to chat
+    assert r.replies == []
+    assert "not delivered" in [m["content"] for m in model.calls[1] if m["role"] == "tool"][-1]
+    assert all(e.actor_type == "human" for e in agent.log.recent(agent.thread))
 
 
 def test_mixed_batch_keeps_chat_live(tmp_path):
-    agent, comments, model = make(tmp_path, ['reply("hi"); comment("d.md", "ok"); stop("x")'])
-    comments.post("d.md", "question?")
+    agent, tickets, model = make(tmp_path, ['reply("hi"); note("7", "ok"); stop("x")'])
+    tickets.add("7", "question?")
     agent.send("hello in chat")
-    r = agent.wake()
-    assert r.replies == ["hi"]
-    assert "Your inbox has new items" in wake_context(model)
+    assert agent.wake().replies == ["hi"]
+    assert "Your inbox has new items" in ctx(model)
 
 
 def test_chat_message_mid_run_lifts_suppression(tmp_path):
     agent = None
 
     def chat_arrives(_):
-        agent.send("also, quick question in chat")
+        agent.send("quick question in chat")
         return 'print("working")'
 
-    model = ScriptedModel(['comment("d.md", "on it")', chat_arrives, 'reply("sure"); stop("x")'])
-    comments = CommentsChannel()
-    agent = Agent(tmp_path / "ws", model, channels=[comments])
-    comments.post("d.md", "please fix")
+    tickets = Tickets()
+    agent = Agent(tmp_path / "ws", ScriptedModel(['note("7", "on it")', chat_arrives, 'reply("sure"); stop("x")']),
+                  channels=[tickets])
+    tickets.add("7", "please fix")
+    assert agent.wake().replies == ["sure"]
+
+
+def test_event_on_an_unowned_artifact_type_falls_back_to_chat(tmp_path):
+    model = ScriptedModel(['reply("saw it"); stop("x")'])
+    agent = Agent(tmp_path / "ws", model, policy=Policy().with_rules(Rule("alert", True, reason="alert")))
+    agent.follow("monitor:cpu", "monitor")
+    agent.log.submit("monitor:cpu", actor_type="system", actor_id="prom", surface="alert",
+                     payload={"text": "CPU at 98%"})
     r = agent.wake()
-    assert r.replies == ["sure"]
-
-
-def test_comment_counts_as_an_answer_for_the_silent_stop_guard(tmp_path):
-    agent, comments, _ = make(tmp_path, ['comment("d.md", "Thanks!"); stop("acked")'])
-    comments.post("d.md", "thanks, looks great")
-    r = agent.wake()
-    assert r.outcome == "stopped" and r.steps == 1
-
-
-class Email(Channel):
-    name = "email"
-    artifact_type = "email"
-
-    def __init__(self):
-        self.sent = []
-
-    def receive(self, sender: str, subject: str, body: str):
-        artifact = f"email:{sender}"
-        self.agent.follow(artifact, self.artifact_type)
-        return self.log.submit(artifact, actor_type="human", actor_id=sender, surface="message",
-                               payload={"text": body, "from": sender, "subject": subject})
-
-    def tools(self):
-        reg = ToolRegistry()
-
-        @reg.tool(group="Email")
-        def send_email(to: str, body: str) -> str:
-            """Send an email."""
-            self.sent.append((to, body))
-            self.agent._emit("channel_reply", channel="email", to=to)
-            return "sent"
-        return reg
-
-    def label(self, event):
-        return f"Email from {event.payload['from']}"
-
-    def reply_hint(self, item):
-        return f"send_email(to={item.meta['from']!r}, body='...')"
-
-    def tail(self, item):
-        return f"Subject: {item.meta['subject']}"
-
-
-def test_custom_channel_plugs_in(tmp_path):
-    email = Email()
-    model = ScriptedModel(['send_email("ada@example.com", "Yes, Tuesday works."); stop("x")'])
-    agent = Agent(tmp_path / "ws", model, channels=[email])
-    email.receive("ada@example.com", "Meeting", "Can we meet Tuesday?")
-    agent.wake()
-    ctx = wake_context(model)
-    assert "→ Reply in: send_email(to='ada@example.com', body='...')" in ctx
-    assert "Email from ada@example.com: Can we meet Tuesday?" in ctx
-    assert "Subject: Meeting" in ctx
-    assert "send_email(to, body)" in agent.tool_schema["function"]["description"]
-    assert email.sent == [("ada@example.com", "Yes, Tuesday works.")]
+    assert r.replies == ["saw it"]                                   # no channel owns it → chat
+    assert "alert on monitor:cpu: CPU at 98%" in ctx(model)
