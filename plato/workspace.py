@@ -17,7 +17,7 @@ import json
 import re
 import threading
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
@@ -46,6 +46,10 @@ class InboxItem:
     ts: str
     label: str
     text: str
+    # Where the event came from and where an answer belongs. None = chat.
+    channel: str | None = None
+    # Channel-specific data (e.g. a comment's entity, thread id, quoted passage).
+    meta: dict = field(default_factory=dict)
 
     def render(self) -> str:
         return f"[{self.ts}] {self.label}: {self.text}"
@@ -74,8 +78,11 @@ class Workspace:
             p.touch(exist_ok=True)
 
     # ── inbox ────────────────────────────────────────────────────────────
-    def inbox_append(self, text: str, label: str = "User says") -> InboxItem:
-        item = InboxItem(uuid.uuid4().hex[:8], datetime.now().strftime("%H:%M"), label, text)
+    def inbox_append(
+        self, text: str, label: str = "User says", channel: str | None = None, meta: dict | None = None
+    ) -> InboxItem:
+        item = InboxItem(uuid.uuid4().hex[:8], datetime.now().strftime("%H:%M"), label, text,
+                         channel, meta or {})
         with self._lock, self.inbox_path.open("a", encoding="utf-8") as f:
             f.write(json.dumps(item.__dict__) + "\n")
         return item

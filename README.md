@@ -51,6 +51,35 @@ agent.wake()
 The signature and first docstring line become the tool's entry in the catalogue
 the model sees. There is no schema to keep in sync.
 
+## Channels: inputs beyond chat
+
+Chat is one way in. A comment on a document, an email, a webhook: each is a
+**channel**. An event on a channel brings three things into the wake beyond
+its own text:
+
+- **A reply route**: a `→ Reply in: comment(...)` line naming the call that
+  answers it. When a whole wake is routed to channels, chat `reply()` is
+  withheld by the harness, not just discouraged by the prompt.
+- **A tail of context**, bounded, built at wake time: for a comment, the quoted
+  passage, the recent thread ("most recent 6 of 14 comments"), and a reference
+  to the document (path + size; the body is read on demand).
+- **Channel rules**: a short prompt for how to behave there, rendered once.
+
+```python
+from plato import Agent, CommentsChannel, OpenAICompatModel
+
+comments = CommentsChannel()
+agent = Agent("./workspace", OpenAICompatModel("gpt-4.1"), channels=[comments])
+
+# your app calls this when a person comments
+comments.post("launch-plan.md", "Design slipped a week. Move the date.",
+              quote="We ship on March 3.")
+agent.wake()   # agent answers with comment(...) in that thread and edits the file
+```
+
+A new channel is a small subclass of `Channel` overriding `tools()`,
+`reply_hint()`, `tail()` and `rules()`; see `plato/channels.py`.
+
 ## Spike caveats
 
 - The executor runs `exec()` in-process. It is **not a sandbox**. A

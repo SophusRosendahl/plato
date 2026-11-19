@@ -28,7 +28,14 @@ from datetime import datetime
 from pathlib import Path
 from typing import Callable
 
-from plato.context import build_system_prompt, build_tool_schema, build_wake_context, render, render_inbox
+from plato.context import (
+    build_system_prompt,
+    build_tool_schema,
+    build_wake_context,
+    render,
+    render_inbox,
+    routed_to_channel,
+)
 from plato.executor import Executor, StopRun
 from plato.model import Model
 from plato.tools import ToolRegistry, default_registry
@@ -80,6 +87,7 @@ class Agent:
         config: Config | None = None,
         tools: ToolRegistry | None = None,
         identity: str = "",
+        channels: list | None = None,
         on_reply: Callable[[str], None] | None = None,
         on_event: Callable[[str, dict], None] | None = None,
     ) -> None:
@@ -88,10 +96,19 @@ class Agent:
         self.cfg = config or Config()
         self.on_reply = on_reply
         self.on_event = on_event
+        self._trace_file: Path | None = None
         self.registry = self._builtin_tools()
         self.registry.extend(default_registry)
         if tools is not None:
             self.registry.extend(tools)
+        # Channels: other ways in besides chat (comments, email, webhooks…).
+        self.channels: dict = {}
+        for ch in channels or []:
+            ch.bind(self)
+            self.channels[ch.name] = ch
+            ch_tools = ch.tools()
+            if ch_tools is not None:
+                self.registry.extend(ch_tools)
         self.system_prompt = build_system_prompt(identity)
         self.tool_schema = build_tool_schema(self.registry.describe())
         # circuit-breaker state (in memory; a restart is a natural reset)
@@ -100,7 +117,8 @@ class Agent:
         self._breaker_tripped = False
         # per-wake
         self._replies: list[str] = []
-        self._trace_file: Path | None = None
+        self._channel_replies = 0
+        self._suppress_chat = False
 
     # ── public API ───────────────────────────────────────────────────────
     def send(self, text: str, label: str = "User says") -> None:
@@ -118,7 +136,7 @@ class Agent:
     # ── the loop ─────────────────────────────────────────────────────────
     def _run(self, inbox) -> WakeResult:
         cfg, ws = self.cfg, self.ws
-        self._replies = []
+        self._replies, self._channel_replies = [], 0
         self._trace_file = ws.traces / f"{datetime.now():%Y%m%d-%H%M%S}-{uuid.uuid4().hex[:6]}.jsonl"
 
         sig = self._todo_signature()
@@ -126,7 +144,11 @@ class Agent:
             self._breaker_sig, self._no_progress_wakes, self._breaker_tripped = sig, 0, False
         budget = min(cfg.breaker_paused_steps, cfg.max_steps) if self._breaker_tripped else cfg.max_steps
 
-        context = build_wake_context(ws, inbox)
+        context = build_wake_context(ws, inbox, channels=self.channels)
+        # Every item arrived on a channel → answers belong there, not in chat.
+        # The prompt says so too, but a prompt alone doesn't reliably stop a
+        # stray chat message, so the harness withholds chat reply() as well.
+        self._suppress_chat = routed_to_channel(inbox, self.channels)
         messages = [{"role": "system", "content": self.system_prompt}, {"role": "user", "content": context}]
         if self._no_progress_wakes:
             messages.append({"role": "user", "content": render(
@@ -148,7 +170,10 @@ class Agent:
                 arrived = ws.pending_inbox()
                 if arrived:
                     ws.consume_inbox({i.id for i in arrived})
-                    messages.append({"role": "user", "content": render("mid_run_message", ITEMS=render_inbox(arrived))})
+                    if not routed_to_channel(arrived, self.channels):
+                        self._suppress_chat = False  # a chat message arrived: chat is live again
+                    items = render_inbox(arrived, self.channels)
+                    messages.append({"role": "user", "content": render("mid_run_message", ITEMS=items)})
                     self._emit("mid_run_inbox", items=len(arrived))
                     used, warned, had_inbox = 1, False, True  # new input buys a fresh budget
             if not warned and wrap_at > 0 and budget - used < wrap_at:
@@ -182,7 +207,8 @@ class Agent:
                 continue
 
             # ── stop requested: apply the guards ──
-            if step == 1 and had_inbox and not self._replies and not ws.non_terminal_todos():
+            answered = self._replies or self._channel_replies
+            if step == 1 and had_inbox and not answered and not ws.non_terminal_todos():
                 rejections += 1
                 messages.append({"role": "user", "content": render("correction_planning_guard")})
                 self._emit("guard", name="silent_stop")
@@ -249,6 +275,8 @@ class Agent:
             self.on_reply(message)
 
     def _emit(self, kind: str, **data) -> None:
+        if kind == "channel_reply":
+            self._channel_replies += 1
         if self._trace_file is not None:
             rec = {"ts": datetime.now().isoformat(timespec="seconds"), "kind": kind, **data}
             with self._trace_file.open("a", encoding="utf-8") as f:
@@ -260,13 +288,20 @@ class Agent:
         reg, ws = ToolRegistry(), self.ws
 
         @reg.tool(group="Talk & lifecycle")
-        def reply(message: str) -> None:
+        def reply(message: str) -> str | None:
             """Send a message to the user (non-blocking)."""
+            if self._suppress_chat:
+                self._emit("reply_suppressed", text=str(message))
+                return "[not delivered: this wake is routed to a channel; answer on the `→ Reply in:` line]"
             self._deliver(str(message))
+            return None
 
         @reg.tool(group="Talk & lifecycle")
         def ask_user(question: str) -> str:
             """Ask the user a question; then mark_todo_blocked() the item that waits on it."""
+            if self._suppress_chat:
+                self._emit("reply_suppressed", text=str(question))
+                return "[not delivered: this wake is routed to a channel; ask there instead]"
             self._deliver(str(question))
             return "Question sent. Park the item that depends on it with mark_todo_blocked(N, reason)."
 
