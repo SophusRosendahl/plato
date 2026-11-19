@@ -76,7 +76,11 @@ def routed_to_channel(items: list[InboxItem], channels: dict | None = None) -> b
 
 
 def build_wake_context(
-    ws: Workspace, inbox: list[InboxItem], now: datetime | None = None, channels: dict | None = None
+    ws: Workspace,
+    inbox: list[InboxItem],
+    now: datetime | None = None,
+    channels: dict | None = None,
+    recall: str = "",
 ) -> str:
     now = now or datetime.now()
     active = ws.active_todos()
@@ -85,16 +89,17 @@ def build_wake_context(
         "memory": f"--- memory ---\n{ws.memory() or '(empty)'}",
         "todo": f"{todo_header}\n{ws.render_todos()}",
         "log": f"--- daily log (recent) ---\n{ws.log_tail() or '(empty)'}",
+        "recall": f"--- recent conversation ---\n{recall}" if recall else "",
         "inbox": f"--- inbox ---\n{render_inbox(inbox, channels)}",
     }
     if inbox:
         # Inbox last: it is closest to where the model starts writing.
         footer = render("footer_reply_channel" if routed_to_channel(inbox, channels) else "footer_new_items")
-        order = ["memory", "todo", "log", "inbox"]
+        order = ["memory", "todo", "log", "recall", "inbox"]
     elif active:
-        order, footer = ["inbox", "todo", "memory", "log"], render("footer_pending_todos")
+        order, footer = ["inbox", "todo", "memory", "log", "recall"], render("footer_pending_todos")
     else:
-        order, footer = ["inbox", "todo", "memory", "log"], ""
+        order, footer = ["inbox", "todo", "memory", "log", "recall"], ""
     head = f"Now: {now.strftime('%A %Y-%m-%d %H:%M')}"
-    body = "\n\n".join(sections[k] for k in order)
+    body = "\n\n".join(sections[k] for k in order if sections[k])
     return "\n\n".join(p for p in (head, body, footer) if p)

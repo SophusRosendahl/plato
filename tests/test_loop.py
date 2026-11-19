@@ -30,7 +30,7 @@ def test_inline_answer_is_one_step(tmp_path):
     assert r.outcome == "stopped" and r.steps == 1
     assert r.replies == ["Hi! What can I do?"]
     assert "Greeted." in agent.ws.log_tail()
-    assert agent.ws.pending_inbox() == []  # consumed on render
+    assert agent.pending_inbox() == []  # consumed on render
 
 
 def test_wake_context_puts_inbox_last_with_footer(tmp_path):
@@ -146,7 +146,7 @@ def test_mid_run_message_is_delivered(tmp_path):
     agent.send("write a poem")
     agent.wake()
     assert any("make it rhyme" in c for c in last_user_msgs(model))
-    assert agent.ws.pending_inbox() == []
+    assert agent.pending_inbox() == []
 
 
 def test_circuit_breaker_trips_and_caps(tmp_path):
@@ -206,7 +206,7 @@ def test_trace_is_written(tmp_path):
     agent.send("hi")
     r = agent.wake()
     kinds = [line.split('"kind": "')[1].split('"')[0] for line in r.trace_path.read_text().splitlines()]
-    assert kinds == ["wake", "reply", "step", "end"]
+    assert kinds == ["gate", "wake", "reply", "step", "end"]
 
 
 @pytest.mark.parametrize("keep", [3, 4, 5])

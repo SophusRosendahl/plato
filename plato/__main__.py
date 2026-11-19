@@ -80,7 +80,12 @@ def watch(args) -> None:
         current = {p.name: p for p in folder.iterdir() if p.is_file()}
         for name in sorted(set(current) - seen):
             body = current[name].read_text(encoding="utf-8", errors="replace")[:4000]
-            agent.send(f"New file `{name}` appeared in the watched folder:\n{body}", label="File appeared")
+            # An honest event on the file's own artifact, not chat in disguise.
+            artifact = f"file:{folder / name}"
+            agent.follow(artifact, "file")
+            agent.log.submit(artifact, actor_type="human", actor_id=agent.human_id, surface="status",
+                             op="upload", payload={"label": f"New file {name} in the watched folder",
+                                                   "text": body})
             seen.add(name)
         agent.wake()
         time.sleep(args.interval)

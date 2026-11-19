@@ -16,7 +16,42 @@ guarantees, and nothing else.
 | Circuit breaker | Repeated no-progress wakes burning budget forever: parks the items, tells the user once, caps later wakes |
 
 State is a folder of plain files (`memory.md`, `todo.md`, `daily_log.md`,
-`inbox.jsonl`, `files/`, `traces/`), so you can watch the agent think.
+`files/`, `traces/`) plus one SQLite event log, so you can watch the agent think.
+
+## The event log and the `should_respond` gate
+
+Everything that happens is an immutable event on one append-only log
+(`events.db`): a person's chat message, a comment, an edit, a file landing, and
+the agent's own replies, comments and edits. Events attach to **artifacts** (a
+chat thread, a document, an email conversation), and participants **subscribe**
+to artifacts.
+
+```
+person/app ──submit──▶ event log ──dispatch──▶ should_respond(participant, event)
+                                                   │ no: logged, costs nothing
+                                                   ▼ yes: inbox item (+ reply surface)
+                                               agent wakes
+```
+
+`should_respond` is a cheap, deterministic, no-LLM pre-filter, run for every
+subscriber before a wake is spent:
+
+- never your own event
+- only if subscribed and visible
+- a chat message is answered in chat
+- a comment, mention or inbound message is answered on that artifact's channel
+- a person's edit doesn't wake (the agent isn't a reviewer of work in progress)
+- bookkeeping (`create`, `rename`, …) doesn't wake
+- an unknown surface never wakes
+
+Every decision carries a reason tag and lands in the trace. The branches that
+vary by product are parameters on `Policy`. Whether to actually respond, and
+how, stays the model's judgment.
+
+Because the agent's own words are on the log, the conversation is two-sided:
+every wake shows the recent conversation, so nothing depends on in-memory
+history surviving a restart. Several agents can share one log; each follows
+the artifacts it cares about.
 
 ## Try it
 

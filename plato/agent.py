@@ -36,10 +36,11 @@ from plato.context import (
     render_inbox,
     routed_to_channel,
 )
+from plato.events import Dispatched, Event, EventLog
 from plato.executor import Executor, StopRun
 from plato.model import Model
 from plato.tools import ToolRegistry, default_registry
-from plato.workspace import Workspace
+from plato.workspace import InboxItem, Workspace
 
 
 @dataclass
@@ -50,6 +51,7 @@ class Config:
     breaker_paused_steps: int = 8
     wrap_up_steps: int = 5
     history_max_messages: int = 40
+    recall_messages: int = 12  # recent chat turns (both sides) shown on every wake
     output_cap: int = 8_000
 
 
@@ -75,6 +77,13 @@ def trim_history(messages: list[dict], keep: int) -> list[dict]:
     return [messages[0]] + messages[cut:]
 
 
+def _default_label(ev: Event) -> str:
+    if ev.surface == "chat":
+        return "User says"
+    what = ev.op or ev.surface
+    return f"{what} on {ev.artifact_id}"
+
+
 _TAGS = re.compile(r"<(script|style)[^>]*>.*?</\1>|<[^>]+>", re.DOTALL | re.IGNORECASE)
 
 
@@ -88,6 +97,9 @@ class Agent:
         tools: ToolRegistry | None = None,
         identity: str = "",
         channels: list | None = None,
+        log: EventLog | None = None,
+        agent_id: str = "agent",
+        human_id: str = "user",
         on_reply: Callable[[str], None] | None = None,
         on_event: Callable[[str, dict], None] | None = None,
     ) -> None:
@@ -97,6 +109,14 @@ class Agent:
         self.on_reply = on_reply
         self.on_event = on_event
         self._trace_file: Path | None = None
+        # The event log is the source of truth for everything that happens; the
+        # inbox is derived from it. Pass a shared log to run several agents on it.
+        self.log = log or EventLog(self.ws.root / "events.db")
+        self.agent_id, self.human_id = agent_id, human_id
+        self.thread = f"thread:{agent_id}"
+        self.log.ensure_artifact(self.thread, "thread", owner_id=human_id)
+        self.log.subscribe(agent_id, self.thread)
+        self._dispatch_log: list[Dispatched] = []
         self.registry = self._builtin_tools()
         self.registry.extend(default_registry)
         if tools is not None:
@@ -121,14 +141,26 @@ class Agent:
         self._suppress_chat = False
 
     # ── public API ───────────────────────────────────────────────────────
-    def send(self, text: str, label: str = "User says") -> None:
-        """Drop an event into the inbox. It does not wake the agent by itself."""
-        self.ws.inbox_append(text, label)
+    def send(self, text: str) -> Event:
+        """A person's chat message: appended to the log. It does not run the
+        agent by itself; `wake()` does."""
+        return self.log.submit(self.thread, actor_type="human", actor_id=self.human_id,
+                               surface="chat", payload={"text": text})
+
+    def follow(self, artifact_id: str, type: str) -> None:  # noqa: A002
+        """Register an artifact and subscribe this agent to its events."""
+        self.log.ensure_artifact(artifact_id, type)
+        self.log.subscribe(self.agent_id, artifact_id)
+
+    def pending_inbox(self) -> list[InboxItem]:
+        """Run the dispatcher, then return what this agent hasn't handled yet."""
+        self._dispatch_log += self.log.dispatch_once()
+        return [self._inbox_item(ev) for ev in self.log.pending_inbox(self.agent_id)]
 
     def wake(self, force: bool = False) -> WakeResult | None:
         """Run one wake if there is anything in the inbox (or `force` and there
         are active todos). Returns None if the agent stays dormant."""
-        inbox = self.ws.pending_inbox()
+        inbox = self.pending_inbox()
         if not inbox and not (force and self.ws.active_todos()):
             return None
         return self._run(inbox)
@@ -144,7 +176,8 @@ class Agent:
             self._breaker_sig, self._no_progress_wakes, self._breaker_tripped = sig, 0, False
         budget = min(cfg.breaker_paused_steps, cfg.max_steps) if self._breaker_tripped else cfg.max_steps
 
-        context = build_wake_context(ws, inbox, channels=self.channels)
+        recall = self._render_recall(exclude={i.id for i in inbox})
+        context = build_wake_context(ws, inbox, channels=self.channels, recall=recall)
         # Every item arrived on a channel → answers belong there, not in chat.
         # The prompt says so too, but a prompt alone doesn't reliably stop a
         # stray chat message, so the harness withholds chat reply() as well.
@@ -153,7 +186,11 @@ class Agent:
         if self._no_progress_wakes:
             messages.append({"role": "user", "content": render(
                 "correction_circuit_breaker", WAKES=self._no_progress_wakes)})
-        ws.consume_inbox({i.id for i in inbox})
+        self.log.mark_done(self.agent_id, {i.id for i in inbox})
+        for d in self._dispatch_log:
+            self._emit("gate", event=d.event.event_id, surface=d.event.surface, artifact=d.event.artifact_id,
+                       participant=d.participant, respond=d.decision.respond, reason=d.decision.reason)
+        self._dispatch_log = []
         self._emit("wake", context=context, budget=budget, inbox=len(inbox))
 
         executor = Executor(self.registry.namespace(), cfg.output_cap)
@@ -167,9 +204,9 @@ class Agent:
             step += 1
             used += 1
             if step > 1:
-                arrived = ws.pending_inbox()
+                arrived = self.pending_inbox()
                 if arrived:
-                    ws.consume_inbox({i.id for i in arrived})
+                    self.log.mark_done(self.agent_id, {i.id for i in arrived})
                     if not routed_to_channel(arrived, self.channels):
                         self._suppress_chat = False  # a chat message arrived: chat is live again
                     items = render_inbox(arrived, self.channels)
@@ -265,11 +302,41 @@ class Agent:
     def _result(self, outcome: str, steps: int, summary: str = "") -> WakeResult:
         return WakeResult(outcome, steps, list(self._replies), summary, self._trace_file)
 
+    def _inbox_item(self, ev: Event) -> InboxItem:
+        """Turn a log event into what the model sees. The gate's reply surface
+        picks the channel: 'chat', or the artifact type a channel handles."""
+        channel = None
+        if ev.reply_surface and ev.reply_surface != "chat":
+            channel = next((c for c in self.channels.values() if c.artifact_type == ev.reply_surface), None)
+        label = (channel.label(ev) if channel else None) or ev.payload.get("label") or _default_label(ev)
+        meta = channel.meta(ev) if channel else {}
+        ts = datetime.fromisoformat(ev.created_at).astimezone().strftime("%H:%M")
+        return InboxItem(ev.event_id, ts, label, ev.text, channel.name if channel else None, meta)
+
+    def _record_edit(self, path: str) -> None:
+        artifact = f"doc:{path}"
+        self.log.ensure_artifact(artifact, "doc")
+        self.log.submit(artifact, actor_type="agent", actor_id=self.agent_id, surface="edit",
+                        payload={"path": path})
+
+    def _render_recall(self, exclude: set[str]) -> str:
+        turns = self.log.recent(self.thread, limit=self.cfg.recall_messages, surfaces=("chat",), exclude=exclude)
+        lines = []
+        for ev in turns:
+            who = "You" if ev.actor_type == "agent" and ev.actor_id == self.agent_id else "User"
+            lines.append(f"{who}: {' '.join(ev.text.split())[:500]}")
+        return "\n".join(lines)
+
     def _todo_signature(self) -> tuple:
         return tuple(t.title for t in self.ws.non_terminal_todos())
 
     def _deliver(self, message: str) -> None:
         self._replies.append(message)
+        # The agent's own words go on the log too, so the conversation is
+        # two-sided and recallable on later wakes. The gate's self-trigger rule
+        # keeps it from waking the agent.
+        self.log.submit(self.thread, actor_type="agent", actor_id=self.agent_id,
+                        surface="chat", payload={"text": message})
         self._emit("reply", text=message)
         if self.on_reply:
             self.on_reply(message)
@@ -352,6 +419,7 @@ class Agent:
             p.parent.mkdir(parents=True, exist_ok=True)
             p.write_text(content, encoding="utf-8")
             ws.note_write()
+            self._record_edit(path)
             return f"wrote {path} ({len(content)} chars)"
 
         @reg.tool(group="Files (your files/ folder)")
@@ -364,6 +432,7 @@ class Agent:
                 return f"[edit refused] `old` occurs {n} times in {path}; it must occur exactly once"
             p.write_text(text.replace(old, new, 1), encoding="utf-8")
             ws.note_write()
+            self._record_edit(path)
             return f"edited {path}"
 
         @reg.tool(group="Files (your files/ folder)")
@@ -374,6 +443,7 @@ class Agent:
             with p.open("a", encoding="utf-8") as f:
                 f.write(content)
             ws.note_write()
+            self._record_edit(path)
             return f"appended to {path}"
 
         @reg.tool(group="Files (your files/ folder)")
