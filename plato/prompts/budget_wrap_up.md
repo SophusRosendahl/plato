@@ -1,0 +1,1 @@
+[harness] Budget notice: about {{STEPS_LEFT}} step(s) left in this wake. When they run out you are cut off mid-thought. Land it now: stop exploring, save anything nearly finished, mark what you finished done, leave unreached items active (they carry over to the next wake), reply() once with what you completed and what is still open, then stop().

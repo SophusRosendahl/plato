@@ -1,0 +1,104 @@
+"""CLI.
+
+    plato chat  --workspace ./ws          talk to the agent
+    plato watch --workspace ./ws DIR      wake the agent when files land in DIR
+
+Model config via env: PLATO_MODEL, PLATO_BASE_URL, PLATO_API_KEY
+(falls back to OPENAI_API_KEY).
+"""
+
+from __future__ import annotations
+
+import argparse
+import os
+import sys
+import time
+from pathlib import Path
+
+from plato.agent import Agent, Config
+from plato.model import OpenAICompatModel
+
+DIM, BOLD, CYAN, YELLOW, RESET = "\033[2m", "\033[1m", "\033[36m", "\033[33m", "\033[0m"
+
+
+def _printer(verbose: bool):
+    def on_event(kind: str, data: dict) -> None:
+        if kind == "wake":
+            print(f"{DIM}── wake (budget {data['budget']} steps, {data['inbox']} inbox item(s)) ──{RESET}")
+        elif kind == "step" and verbose:
+            print(f"{DIM}[step {data['step']}] {data.get('thoughts', '')}{RESET}")
+            for ln in (data.get("code") or "").splitlines():
+                print(f"{DIM}  │ {ln}{RESET}")
+            if data.get("output"):
+                for ln in data["output"].rstrip().splitlines()[:15]:
+                    print(f"{DIM}  ↳ {ln}{RESET}")
+        elif kind == "guard":
+            extra = {k: v for k, v in data.items() if k != "name"}
+            print(f"{YELLOW}⛨ guard: {data['name']} {extra or ''}{RESET}")
+        elif kind == "end":
+            print(f"{DIM}── dormant ({data['outcome']}) ──{RESET}")
+    return on_event
+
+
+def _build_agent(args) -> Agent:
+    model_name = os.environ.get("PLATO_MODEL")
+    if not model_name:
+        sys.exit("set PLATO_MODEL (and PLATO_BASE_URL / PLATO_API_KEY for non-OpenAI providers)")
+    model = OpenAICompatModel(
+        model_name,
+        base_url=os.environ.get("PLATO_BASE_URL"),
+        api_key=os.environ.get("PLATO_API_KEY") or os.environ.get("OPENAI_API_KEY"),
+    )
+    return Agent(
+        args.workspace, model,
+        config=Config(max_steps=args.max_steps),
+        on_reply=lambda text: print(f"{BOLD}{CYAN}agent ›{RESET} {text}"),
+        on_event=_printer(args.verbose),
+    )
+
+
+def chat(args) -> None:
+    agent = _build_agent(args)
+    print(f"{DIM}workspace: {agent.ws.root}  (ctrl-d to quit){RESET}")
+    while True:
+        try:
+            text = input(f"{BOLD}you ›{RESET} ").strip()
+        except EOFError:
+            print()
+            return
+        if text:
+            agent.send(text)
+            agent.wake()
+
+
+def watch(args) -> None:
+    agent = _build_agent(args)
+    folder = Path(args.folder).resolve()
+    seen = {p.name for p in folder.iterdir()} if folder.exists() else set()
+    print(f"{DIM}watching {folder} — drop a file in to wake the agent (ctrl-c to quit){RESET}")
+    while True:
+        current = {p.name: p for p in folder.iterdir() if p.is_file()}
+        for name in sorted(set(current) - seen):
+            body = current[name].read_text(encoding="utf-8", errors="replace")[:4000]
+            agent.send(f"New file `{name}` appeared in the watched folder:\n{body}", label="File appeared")
+            seen.add(name)
+        agent.wake()
+        time.sleep(args.interval)
+
+
+def main() -> None:
+    p = argparse.ArgumentParser(prog="plato")
+    p.add_argument("--workspace", default="./workspace")
+    p.add_argument("--max-steps", type=int, default=30)
+    p.add_argument("-v", "--verbose", action="store_true", help="show thoughts, code and output per step")
+    sub = p.add_subparsers(dest="cmd", required=True)
+    sub.add_parser("chat")
+    w = sub.add_parser("watch")
+    w.add_argument("folder")
+    w.add_argument("--interval", type=float, default=2.0)
+    args = p.parse_args()
+    {"chat": chat, "watch": watch}[args.cmd](args)
+
+
+if __name__ == "__main__":
+    main()

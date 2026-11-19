@@ -1,0 +1,1 @@
+[harness] Circuit breaker: your last {{WAKES}} wake(s) on these same todo items hit the step limit with no durable progress (no todo resolved, no file written). Do not retry the same approach. If the inbox gives you a concrete new way forward, take it; otherwise tell the user briefly that you're stuck and why, park the items with mark_todo_blocked(), and stop().

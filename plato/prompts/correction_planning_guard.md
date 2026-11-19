@@ -1,0 +1,1 @@
+[harness] You called stop() without replying to the user or planning anything, but your inbox had new items. Either answer them inline (reply() + stop() in one block) or plan the work with add_todo() and carry it out. Do not go dormant silently.
