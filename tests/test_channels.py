@@ -7,6 +7,7 @@ building blocks work for any kind of input.
 from plato import (
     Agent,
     Channel,
+    Chat,
     FileReference,
     PayloadField,
     Policy,
@@ -75,7 +76,7 @@ def test_channel_event_is_routed_with_hint_tail_and_guidance(tmp_path):
     assert "Priority: high" in c                                     # PayloadField
     assert "File: log.txt (4 chars, 3 lines)" in c                    # FileReference, body not inlined
     assert c.count("--- tickets ---") == 1                           # guidance once
-    assert "Respond in the channel named" in c                       # channel footer
+    assert "Answer each item where it arrived" in c                  # generic footer
     assert r.outcome == "stopped" and r.steps == 1                    # act() counts as answering
 
 
@@ -150,3 +151,40 @@ def test_event_on_an_unowned_artifact_type_falls_back_to_chat(tmp_path):
     r = agent.wake()
     assert r.replies == ["saw it"]                                   # no channel owns it → chat
     assert "alert on monitor:cpu: CPU at 98%" in ctx(model)
+
+
+# ── chat is just another channel ─────────────────────────────────────────
+def test_agent_without_chat_works_only_through_its_channels(tmp_path):
+    tickets = Tickets()
+    model = ScriptedModel(['note("7", "on it"); stop("x")'])
+    agent = Agent(tmp_path / "ws", model, channels=[tickets], chat=False)
+    desc = agent.tool_schema["function"]["description"]
+    assert "reply(" not in desc and "note(ticket, text)" in desc
+    tickets.add("7", "help")
+    assert agent.wake().outcome == "stopped"
+    assert agent.policy.rules == Tickets.gate_rules                  # no chat rule anywhere
+
+
+def test_chat_can_be_configured_like_any_channel(tmp_path):
+    heard = []
+    model = ScriptedModel(['reply("one"); stop("x")', 'reply("two"); stop("x")', 'reply("three"); stop("x")'])
+    agent = Agent(tmp_path / "ws", model, chat=Chat(recall=2, on_message=heard.append))
+    for text in ("a", "b", "c"):
+        agent.send(text)
+        agent.wake()
+    assert heard == ["one", "two", "three"]
+    recall = ctx(model, call=2).split("--- recent conversation ---\n")[1].split("\n\n")[0]
+    assert recall.splitlines() == ["User: b", "You: two"]              # bounded to 2 turns
+
+
+def test_answer_only_when_asked_is_generic(tmp_path):
+    class QuietTickets(Tickets):
+        answer_only_when_asked = True
+
+    tickets = QuietTickets()
+    model = ScriptedModel(['note("7", "unprompted")', 'reply("hi"); stop("x")'])
+    agent = Agent(tmp_path / "ws", model, channels=[tickets])
+    agent.send("hello")                                              # input arrives by chat only
+    r = agent.wake()
+    assert [a["channel"] for a in r.actions] == ["chat"]              # the ticket note was held back
+    assert agent.log.recent("ticket:7") == []

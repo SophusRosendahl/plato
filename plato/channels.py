@@ -1,21 +1,26 @@
-"""Channels: the building block for every way into the agent beyond its own chat.
+"""Channels: the building block for every way in and out of the agent.
 
-A channel owns one or more **artifact types** on the event log (say `file`,
-`email`, `ticket`). It decides five things, each optional:
+A channel owns one or more **artifact types** on the event log (say `thread`,
+`file`, `email`, `ticket`). It decides these things, each optional:
 
-    gate_rules   which of its events wake the agent (`should_respond` rules)
-    tools()      what the agent calls to act there (e.g. post a reply)
-    reply_hint() the `→ Reply in:` line telling the agent where to answer
-    tail_parts   bounded extra context an event drags into the wake
-    guidance     a short prompt on how to behave in this channel
+    gate_rules     which of its events wake the agent (`should_respond` rules)
+    tools()        what the agent calls to act there (e.g. post a reply)
+    reply_hint()   the `→ Reply in:` line telling the agent where to answer
+    tail_parts     bounded extra context an event drags into the wake
+    guidance       a short prompt on how to behave in this channel
+    context()      a section shown on *every* wake (e.g. the recent conversation)
+    notify()       how the harness reaches the person, if this channel can
+    answer_only_when_asked
+                   hold back this channel's actions on a wake where nothing
+                   arrived through it, so an answer lands where the question was
+                   asked (a prompt alone doesn't reliably prevent a stray reply)
 
-When the gate decides an event should be answered "on the artifact", the event
-is routed to the channel that owns that artifact type. If every item in a wake
-is routed to channels, the harness withholds chat `reply()`: the answer belongs
-where the question was asked.
+The gate routes an event to the channel named by its rule's `answer`, or else to
+the channel owning the event's artifact type.
 
-Nothing here knows about comments, email or any other product concept: those
-are built on top (see `examples/`).
+Nothing here knows about chat, comments, email or any other product concept.
+Chat is built in (`plato/chat.py`) but uses only this interface; the rest are
+built on top (see `examples/`).
 """
 
 from __future__ import annotations
@@ -38,6 +43,7 @@ class Channel:
     gate_rules: tuple[Rule, ...] = ()
     tail_parts: tuple[TailPart, ...] = ()
     guidance: str = ""
+    answer_only_when_asked: bool = False
 
     def bind(self, agent: Agent) -> None:
         """Called once when the agent is built."""
@@ -63,7 +69,12 @@ class Channel:
         parent_id: str | None = None, **payload,
     ) -> Event:
         """Record the agent acting in this channel (e.g. its reply). Counts as
-        the agent answering; the gate's self-trigger check stops it re-waking."""
+        the agent answering; the gate's self-trigger check stops it re-waking.
+        Returns None, recording nothing, if this channel is held back on this
+        wake (see `answer_only_when_asked`); tools should then return WITHHELD."""
+        if self.withheld():
+            self.agent._emit("withheld", channel=self.name, artifact=artifact_id, text=text)
+            return None
         self.agent.follow(artifact_id, artifact_type)
         ev = self.log.submit(
             artifact_id, actor_type="agent", actor_id=self.agent.agent_id, surface=surface,
@@ -100,3 +111,19 @@ class Channel:
 
     def guide(self) -> str:
         return self.guidance.strip()
+
+    def context(self, exclude: set[str]) -> str:
+        """A section for every wake, whatever the inbox holds. `exclude` is the
+        ids of the events being delivered now (so they aren't shown twice)."""
+        return ""
+
+    def notify(self, text: str) -> bool:
+        """Tell the person something from the harness itself. Return True if
+        delivered. Channels that can't reach a person return False."""
+        return False
+
+    def withheld(self) -> bool:
+        return self.agent._withheld(self)
+
+
+WITHHELD = "[not delivered: nothing in this wake arrived through this channel; answer where you were asked, on the `→ Reply in:` line]"

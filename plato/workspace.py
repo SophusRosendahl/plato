@@ -44,7 +44,7 @@ class InboxItem:
     ts: str
     label: str
     text: str
-    # Where the event came from and where an answer belongs. None = chat.
+    # The channel the event was routed to. None = no channel owns it.
     channel: str | None = None
     # Channel-specific data pulled off the event (ids, payload fields).
     meta: dict = field(default_factory=dict)

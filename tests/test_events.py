@@ -2,14 +2,17 @@
 
 import pytest
 
-from plato import Agent, ScriptedModel
+from plato import Agent, Chat, ScriptedModel
 from plato.events import EventLog
 from plato.should_respond import ArtifactView, Participant, Policy, Rule, should_respond
 
 
 # ── the gate (pure) ──────────────────────────────────────────────────────
+CHAT = Policy(rules=Chat.gate_rules)  # what the built-in chat channel contributes
+
+
 def gate(surface, actor=("human", "u"), artifact="thread", op=None, payload=None, vis="all",
-         me="agent", policy=None, subscribed=True):
+         me="agent", policy=CHAT, subscribed=True):
     ev = {"surface": surface, "actor_type": actor[0], "actor_id": actor[1], "op": op,
           "payload": payload or {}, "visibility": vis}
     return should_respond(Participant(me), ev, ArtifactView(artifact, subscribed), policy)
@@ -30,7 +33,8 @@ TICKETS = Policy().with_rules(
     (dict(surface="chat", vis="x, agent"), True, "chat", "chat-message"),
     (dict(surface="chat", payload={"to": ["bob"]}), False, None, "addressed-to-others"),
     (dict(surface="chat", payload={"to": ["agent"]}), True, "chat", "chat-message"),
-    # the one built-in rule
+    # the gate has no built-in rules; chat's own rule routes chat to the chat channel
+    (dict(surface="chat", policy=Policy()), False, None, "no-rule"),
     (dict(surface="chat"), True, "chat", "chat-message"),
     (dict(surface="chat", artifact="file"), True, "chat", "chat-message"),     # chat anywhere → chat
     (dict(surface="chat", actor=("agent", "other-agent")), True, "chat", "chat-message"),
@@ -43,7 +47,7 @@ TICKETS = Policy().with_rules(
     (dict(surface="status", artifact="ticket", op="moved", policy=TICKETS), True, "ticket", "status-change"),
     (dict(surface="status", artifact="ticket", actor=("system", "cron"), policy=TICKETS),
      False, None, "no-rule"),
-    (dict(surface="note", artifact="thread", policy=TICKETS), True, "chat", "note"),  # chat artifact
+    (dict(surface="note", artifact="thread", policy=TICKETS), True, "thread", "note"),  # no special artifacts
 ])
 def test_gate_branches(kwargs, respond, surface, reason):
     d = gate(**kwargs)
@@ -101,6 +105,7 @@ def test_mark_done_only_flips_what_was_shown(tmp_path):
     log = EventLog(tmp_path / "e.db")
     log.ensure_artifact("thread:a", "thread")
     log.subscribe("a", "thread:a")
+    log.set_policy("a", CHAT)
     shown = log.submit("thread:a", actor_type="human", actor_id="u", surface="chat", payload={"text": "1"})
     log.dispatch_once()
     log.submit("thread:a", actor_type="human", actor_id="u", surface="chat", payload={"text": "2"})
@@ -113,6 +118,7 @@ def test_log_survives_reopen(tmp_path):
     log = EventLog(tmp_path / "e.db")
     log.ensure_artifact("thread:a", "thread")
     log.subscribe("a", "thread:a")
+    log.set_policy("a", CHAT)
     log.submit("thread:a", actor_type="human", actor_id="u", surface="chat", payload={"text": "persisted"})
     log.dispatch_once()
     again = EventLog(tmp_path / "e.db")

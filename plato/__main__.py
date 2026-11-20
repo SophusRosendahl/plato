@@ -16,6 +16,7 @@ import time
 from pathlib import Path
 
 from plato.agent import Agent, Config
+from plato.chat import Chat
 from plato.model import OpenAICompatModel
 
 DIM, BOLD, CYAN, YELLOW, RESET = "\033[2m", "\033[1m", "\033[36m", "\033[33m", "\033[0m"
@@ -52,7 +53,7 @@ def _build_agent(args) -> Agent:
     return Agent(
         args.workspace, model,
         config=Config(max_steps=args.max_steps),
-        on_reply=lambda text: print(f"{BOLD}{CYAN}agent ›{RESET} {text}"),
+        chat=Chat(on_message=lambda text: print(f"{BOLD}{CYAN}agent ›{RESET} {text}")),
         on_event=_printer(args.verbose),
     )
 

@@ -26,9 +26,9 @@ concept. It gives you five blocks, and everything else is built from them.
 | Block | What it is |
 |---|---|
 | **Event log** (`EventLog`) | One append-only SQLite log. Every action by every actor (people, systems, the agent itself) is an immutable event on an **artifact** (anything events attach to: a file, an email thread, a ticket). A **surface** is a free-form string naming the kind of event. Participants **subscribe** to artifacts. |
-| **Gate** (`should_respond`, `Policy`, `Rule`) | A cheap, deterministic filter (no LLM) run for every subscriber before a wake is spent. Universal checks are fixed: not your own event, subscribed, visible, addressed to you. Then your ordered `Rule`s decide by surface, op and actor type whether to wake and where the answer goes. No matching rule means no wake. The only built-in rule is chat. Every decision carries a reason, written to the trace. |
+| **Gate** (`should_respond`, `Policy`, `Rule`) | A cheap, deterministic filter (no LLM) run for every subscriber before a wake is spent. Universal checks are fixed: not your own event, subscribed, visible, addressed to you. Then your ordered `Rule`s decide by surface, op and actor type whether to wake and where the answer goes. No matching rule means no wake. The gate has no built-in rules at all. Every decision carries a reason, written to the trace. |
 | **Inbox** | Derived from the log: the dispatcher turns gate yeses into inbox items. A wake marks done exactly what it showed the agent. |
-| **Channel** (`Channel`) | Owns one or more artifact types. It contributes gate rules for its events, tools to act there, a `→ Reply in:` hint, a context tail, and guidance text. When a wake is entirely channel-routed, the harness withholds chat `reply()`. |
+| **Channel** (`Channel`) | Every way in and out, chat included. Owns one or more artifact types and contributes gate rules, tools, a `→ Reply in:` hint, a context tail, guidance, an every-wake `context()` section, and `notify()`. A channel marked `answer_only_when_asked` has its actions held back on a wake where nothing arrived through it, so answers land where the question was asked. |
 | **Tail parts** (`RecentEvents`, `PayloadField`, `FileReference`) | Composable, bounded context an event brings into the wake, such as the recent thread, a quoted passage, or a pointer to a file whose body is read on demand. |
 
 ```
@@ -41,6 +41,25 @@ person / app / webhook ──submit──▶ event log ──dispatch──▶ g
 The agent's own replies and edits are on the log too, so each wake shows the
 recent conversation from both sides, and several agents can share one log (each
 with its own rules).
+
+### Chat is just another channel
+
+Chat is built in, since every agent needs somewhere to talk, but the harness
+doesn't special-case it. `plato/chat.py` is an ordinary `Channel` and the
+reference example for writing one:
+
+- one `thread` artifact
+- `Rule("chat", True, answer="chat")`
+- `reply()` and `ask_user()` as its tools
+- the recent conversation as its every-wake `context()`
+- `notify()` for messages from the harness itself
+- `answer_only_when_asked`, so a comment-only wake can't leak a chat reply
+
+```python
+Agent(ws, model)                                   # chat installed by default
+Agent(ws, model, chat=Chat(recall=4, on_message=print))
+Agent(ws, model, channels=[Tickets()], chat=False) # an agent that only works tickets
+```
 
 ## Try it
 

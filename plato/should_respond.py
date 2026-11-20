@@ -18,10 +18,9 @@ Two layers:
    matching rule means no wake, so an unrecognised kind of event never costs
    money.
 
-The core ships exactly one rule: a `chat` message is answered in chat (the
-agent's own conversation). Everything else — comments, emails, uploads, task
-status changes — is defined by whoever builds on top, usually by a `Channel`
-contributing its rules.
+The gate ships no rules at all. Every kind of event, chat included, gets its
+meaning from rules a `Channel` contributes (the built-in chat channel
+contributes `Rule("chat", ...)` like any other).
 """
 
 from __future__ import annotations
@@ -29,7 +28,6 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 
 ANY = "*"
-CHAT = "chat"
 ON_ARTIFACT = "artifact"
 
 
@@ -38,8 +36,10 @@ class Rule:
     """One routing rule. Matches on surface (and optionally op / actor type).
 
     `respond=True` wakes the participant; `answer` says where its response
-    belongs: `"artifact"` (on the channel that handles the event's artifact
-    type) or `"chat"`. `reason` is the tag the decision reports.
+    belongs: `"artifact"` (the channel that owns the event's artifact type), or
+    the name of a channel to route to instead (e.g. a chat message typed in a
+    file's sidebar can still be answered in `"chat"`). `reason` is the tag the
+    decision reports.
     """
 
     surface: str
@@ -57,14 +57,9 @@ class Rule:
         )
 
 
-CHAT_RULE = Rule(CHAT, True, answer=CHAT, reason="chat-message")
-
-
 @dataclass(frozen=True)
 class Policy:
-    rules: tuple[Rule, ...] = (CHAT_RULE,)
-    # Artifacts you talk to in a chat window: answering "on the artifact" means chat.
-    chat_artifact_types: frozenset[str] = frozenset({"thread"})
+    rules: tuple[Rule, ...] = ()
 
     def with_rules(self, *rules: Rule) -> Policy:
         """A copy with `rules` added after the existing ones (earlier rules win)."""
@@ -87,7 +82,7 @@ class ArtifactView:
 @dataclass(frozen=True)
 class Decision:
     respond: bool
-    surface: str | None  # 'chat', or the artifact type whose channel should answer
+    surface: str | None  # where the answer goes: an artifact type, or a channel name
     reason: str
 
     def __bool__(self) -> bool:
@@ -130,7 +125,5 @@ def should_respond(
             reason = rule.reason or f"{surface}{'/' + op if op else ''}"
             if not rule.respond:
                 return _no(reason)
-            if rule.answer == CHAT or view.type in policy.chat_artifact_types:
-                return Decision(True, CHAT, reason)
-            return Decision(True, view.type, reason)
+            return Decision(True, view.type if rule.answer == ON_ARTIFACT else rule.answer, reason)
     return _no("no-rule")  # safe default: an unrecognised event never costs a wake
