@@ -3,7 +3,7 @@
     memory.md      durable facts the agent keeps about its user/world
     todo.md        the plan: `N. [ ] title` (active), [x] done, [~] blocked, [-] cancelled
     daily_log.md   one line per finished run (written by the harness on stop)
-    inbox.jsonl    pending events (triggers) not yet seen by the agent
+    events.db      the event log (SQLite): every event, subscriptions, the inbox
     files/         the agent's working files — the only place file tools reach
     traces/        JSONL trace per wake
 
@@ -13,11 +13,9 @@ agent think.
 
 from __future__ import annotations
 
-import json
 import re
 import threading
-import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
@@ -46,6 +44,10 @@ class InboxItem:
     ts: str
     label: str
     text: str
+    # The channel the event was routed to. None = no channel owns it.
+    channel: str | None = None
+    # Channel-specific data pulled off the event (ids, payload fields).
+    meta: dict = field(default_factory=dict)
 
     def render(self) -> str:
         return f"[{self.ts}] {self.label}: {self.text}"
@@ -63,36 +65,14 @@ class Workspace:
         self.memory_path = self.root / "memory.md"
         self.todo_path = self.root / "todo.md"
         self.log_path = self.root / "daily_log.md"
-        self.inbox_path = self.root / "inbox.jsonl"
         self._lock = threading.RLock()
         # Monotonic count of "durable progress" (todo resolved, file written).
         # The circuit breaker compares it before/after a run.
         self.progress = 0
         for d in (self.root, self.files, self.traces):
             d.mkdir(parents=True, exist_ok=True)
-        for p in (self.memory_path, self.todo_path, self.log_path, self.inbox_path):
+        for p in (self.memory_path, self.todo_path, self.log_path):
             p.touch(exist_ok=True)
-
-    # ── inbox ────────────────────────────────────────────────────────────
-    def inbox_append(self, text: str, label: str = "User says") -> InboxItem:
-        item = InboxItem(uuid.uuid4().hex[:8], datetime.now().strftime("%H:%M"), label, text)
-        with self._lock, self.inbox_path.open("a", encoding="utf-8") as f:
-            f.write(json.dumps(item.__dict__) + "\n")
-        return item
-
-    def pending_inbox(self) -> list[InboxItem]:
-        with self._lock:
-            lines = self.inbox_path.read_text(encoding="utf-8").splitlines()
-        return [InboxItem(**json.loads(ln)) for ln in lines if ln.strip()]
-
-    def consume_inbox(self, ids: set[str]) -> None:
-        """Remove exactly the items the agent was shown. Anything that arrived
-        after rendering survives for the next look."""
-        with self._lock:
-            keep = [i for i in self.pending_inbox() if i.id not in ids]
-            self.inbox_path.write_text(
-                "".join(json.dumps(i.__dict__) + "\n" for i in keep), encoding="utf-8"
-            )
 
     # ── todos ────────────────────────────────────────────────────────────
     def todos(self) -> list[Todo]:

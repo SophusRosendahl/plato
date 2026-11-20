@@ -16,6 +16,7 @@ import time
 from pathlib import Path
 
 from plato.agent import Agent, Config
+from plato.chat import Chat
 from plato.model import OpenAICompatModel
 
 DIM, BOLD, CYAN, YELLOW, RESET = "\033[2m", "\033[1m", "\033[36m", "\033[33m", "\033[0m"
@@ -52,7 +53,7 @@ def _build_agent(args) -> Agent:
     return Agent(
         args.workspace, model,
         config=Config(max_steps=args.max_steps),
-        on_reply=lambda text: print(f"{BOLD}{CYAN}agent ›{RESET} {text}"),
+        chat=Chat(on_message=lambda text: print(f"{BOLD}{CYAN}agent ›{RESET} {text}")),
         on_event=_printer(args.verbose),
     )
 
@@ -80,7 +81,12 @@ def watch(args) -> None:
         current = {p.name: p for p in folder.iterdir() if p.is_file()}
         for name in sorted(set(current) - seen):
             body = current[name].read_text(encoding="utf-8", errors="replace")[:4000]
-            agent.send(f"New file `{name}` appeared in the watched folder:\n{body}", label="File appeared")
+            # An honest event on the file's own artifact, not chat in disguise.
+            artifact = f"file:{folder / name}"
+            agent.follow(artifact, "file")
+            agent.log.submit(artifact, actor_type="human", actor_id=agent.human_id, surface="status",
+                             op="upload", payload={"label": f"New file {name} in the watched folder",
+                                                   "text": body})
             seen.add(name)
         agent.wake()
         time.sleep(args.interval)

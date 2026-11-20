@@ -43,11 +43,39 @@ def build_tool_schema(tools_catalogue: str) -> dict:
     }
 
 
-def render_inbox(items: list[InboxItem]) -> str:
-    return "\n".join(i.render() for i in items) or "(empty)"
+def render_inbox(items: list[InboxItem], channels: dict | None = None) -> str:
+    """Render inbox items. An item on a known channel gets its `→ Reply in:`
+    route and its tail; each channel's guidance is appended once."""
+    channels = channels or {}
+    blocks: list[str] = []
+    used: list = []
+    for item in items:
+        ch = channels.get(item.channel) if item.channel else None
+        if ch is None:
+            blocks.append(item.render())
+            continue
+        parts = []
+        hint = ch.reply_hint(item)
+        if hint:
+            parts.append(f"→ Reply in: {hint}")
+        parts.append(item.render())
+        tail = ch.tail(item)
+        if tail:
+            parts.append(tail)
+        blocks.append("\n".join(parts))
+        if ch not in used:
+            used.append(ch)
+    rules = [g for g in (ch.guide() for ch in used) if g]
+    return "\n\n".join(blocks + rules) or "(empty)"
 
 
-def build_wake_context(ws: Workspace, inbox: list[InboxItem], now: datetime | None = None) -> str:
+def build_wake_context(
+    ws: Workspace,
+    inbox: list[InboxItem],
+    now: datetime | None = None,
+    channels: dict | None = None,
+    standing: list[str] | None = None,
+) -> str:
     now = now or datetime.now()
     active = ws.active_todos()
     todo_header = "--- todo ---" + ("  ⚠ PENDING ITEMS" if active and not inbox else "")
@@ -55,15 +83,17 @@ def build_wake_context(ws: Workspace, inbox: list[InboxItem], now: datetime | No
         "memory": f"--- memory ---\n{ws.memory() or '(empty)'}",
         "todo": f"{todo_header}\n{ws.render_todos()}",
         "log": f"--- daily log (recent) ---\n{ws.log_tail() or '(empty)'}",
-        "inbox": f"--- inbox ---\n{render_inbox(inbox)}",
+        "standing": "\n\n".join(standing or []),  # channels' every-wake sections
+        "inbox": f"--- inbox ---\n{render_inbox(inbox, channels)}",
     }
     if inbox:
         # Inbox last: it is closest to where the model starts writing.
-        order, footer = ["memory", "todo", "log", "inbox"], render("footer_new_items")
+        footer = render("footer_new_items")
+        order = ["memory", "todo", "log", "standing", "inbox"]
     elif active:
-        order, footer = ["inbox", "todo", "memory", "log"], render("footer_pending_todos")
+        order, footer = ["inbox", "todo", "memory", "log", "standing"], render("footer_pending_todos")
     else:
-        order, footer = ["inbox", "todo", "memory", "log"], ""
+        order, footer = ["inbox", "todo", "memory", "log", "standing"], ""
     head = f"Now: {now.strftime('%A %Y-%m-%d %H:%M')}"
-    body = "\n\n".join(sections[k] for k in order)
+    body = "\n\n".join(sections[k] for k in order if sections[k])
     return "\n\n".join(p for p in (head, body, footer) if p)

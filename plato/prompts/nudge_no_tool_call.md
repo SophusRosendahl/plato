@@ -1,1 +1,1 @@
-[harness] You must call the run tool with Python code. Use reply() to talk to the user and stop() when you're done.
+[harness] You must call the run tool with Python code. Answer with the call on each item's `→ Reply in:` line and stop() when you're done.
