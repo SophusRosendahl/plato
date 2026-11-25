@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import re
+import threading
 import urllib.request
 import uuid
 from dataclasses import dataclass, field
@@ -38,7 +39,7 @@ from plato.context import (
     render_inbox,
 )
 from plato.events import Dispatched, Event, EventLog
-from plato.executor import Executor, StopRun
+from plato.executor import Executor, StopRun, uncaptured
 from plato.model import Model
 from plato.should_respond import Policy
 from plato.tools import ToolRegistry, default_registry
@@ -120,6 +121,7 @@ class Agent:
         # per-wake state, read by channels
         self._actions: list[dict] = []
         self._live: set[str] | None = None  # channels the current wake's input arrived through
+        self.busy = False  # True while a wake is running (for UIs: "thinking…")
         self._dispatch_log: list[Dispatched] = []
         self.registry = self._builtin_tools()
         self.registry.extend(default_registry)
@@ -170,7 +172,11 @@ class Agent:
 
     def pending_inbox(self) -> list[InboxItem]:
         """Run the dispatcher, then return what this agent hasn't handled yet."""
-        self._dispatch_log += self.log.dispatch_once()
+        new = self.log.dispatch_once()
+        self._dispatch_log += new
+        if self.on_event:  # observers see every gate decision right away, woken or not
+            for d in new:
+                self.on_event("gate", self._gate_record(d))
         return [self._inbox_item(ev) for ev in self.log.pending_inbox(self.agent_id)]
 
     def wake(self, force: bool = False) -> WakeResult | None:
@@ -181,8 +187,28 @@ class Agent:
             return None
         return self._run(inbox)
 
+    def serve(self, stop: threading.Event | None = None, poll: float = 2.0) -> None:
+        """Run always-on: dormant until something new lands on the log, then
+        wake. Messages that arrive *during* a wake are delivered into it at the
+        next step, so a person can keep typing while the agent works. Run it in
+        a thread and set `stop` to end it."""
+        stop = stop or threading.Event()
+        while not stop.is_set():
+            seen = self.log.last_seq()  # before checking, so nothing slips between
+            if self.wake() is None:
+                self.log.wait_for_events(seen, timeout=poll)
+
     # ── the loop ─────────────────────────────────────────────────────────
     def _run(self, inbox) -> WakeResult:
+        self.busy = True
+        try:
+            return self._run_inner(inbox)
+        finally:
+            self.busy = False
+            self._live = None
+            self._trace_file = None  # events between wakes don't belong to the last wake's trace
+
+    def _run_inner(self, inbox) -> WakeResult:
         cfg, ws = self.cfg, self.ws
         self._actions = []
         self._trace_file = ws.traces / f"{datetime.now():%Y%m%d-%H%M%S}-{uuid.uuid4().hex[:6]}.jsonl"
@@ -202,9 +228,8 @@ class Agent:
             messages.append({"role": "user", "content": render(
                 "correction_circuit_breaker", WAKES=self._no_progress_wakes)})
         self.log.mark_done(self.agent_id, {i.id for i in inbox})
-        for d in self._dispatch_log:
-            self._emit("gate", event=d.event.event_id, surface=d.event.surface, artifact=d.event.artifact_id,
-                       participant=d.participant, respond=d.decision.respond, reason=d.decision.reason)
+        for d in self._dispatch_log:  # into this wake's trace (observers already saw them)
+            self._trace("gate", self._gate_record(d))
         self._dispatch_log = []
         self._emit("wake", context=context, budget=budget, inbox=len(inbox))
 
@@ -355,16 +380,26 @@ class Agent:
         if not any(ch.notify(text) for ch in self.channels.values()):
             self._emit("notify_undelivered", text=text)
 
-    def _emit(self, kind: str, **data) -> None:
-        if kind == "channel_reply":
-            self._actions.append({"channel": data["channel"], "artifact": data.get("artifact"),
-                                  "text": data.get("text", "")})
+    @staticmethod
+    def _gate_record(d: Dispatched) -> dict:
+        return {"event": d.event.event_id, "surface": d.event.surface, "op": d.event.op,
+                "artifact": d.event.artifact_id, "actor": d.event.actor_id, "participant": d.participant,
+                "respond": d.decision.respond, "reason": d.decision.reason}
+
+    def _trace(self, kind: str, data: dict) -> None:
         if self._trace_file is not None:
             rec = {"ts": datetime.now().isoformat(timespec="seconds"), "kind": kind, **data}
             with self._trace_file.open("a", encoding="utf-8") as f:
                 f.write(json.dumps(rec, default=str) + "\n")
+
+    def _emit(self, kind: str, **data) -> None:
+        if kind == "channel_reply":
+            self._actions.append({"channel": data["channel"], "artifact": data.get("artifact"),
+                                  "text": data.get("text", "")})
+        self._trace(kind, data)
         if self.on_event:
-            self.on_event(kind, data)
+            with uncaptured():  # an observer's prints belong on screen, not in the agent's output
+                self.on_event(kind, data)
 
     def _builtin_tools(self) -> ToolRegistry:
         reg, ws = ToolRegistry(), self.ws

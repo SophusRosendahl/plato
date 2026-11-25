@@ -1,5 +1,7 @@
 """The event log, the should_respond gate, and the agent running on top of them."""
 
+import re
+
 import pytest
 
 from plato import Agent, Chat, ScriptedModel
@@ -8,7 +10,7 @@ from plato.should_respond import ArtifactView, Participant, Policy, Rule, should
 
 
 # ── the gate (pure) ──────────────────────────────────────────────────────
-CHAT = Policy(rules=Chat.gate_rules)  # what the built-in chat channel contributes
+CHAT = Policy(rules=Chat().gate_rules)  # what the built-in chat channel contributes
 
 
 def gate(surface, actor=("human", "u"), artifact="thread", op=None, payload=None, vis="all",
@@ -135,7 +137,8 @@ def test_agent_replies_are_logged_and_recalled_next_wake(tmp_path):
     agent.send("what's my name?")
     agent.wake()
     ctx = model.calls[1][1]["content"]
-    assert "--- recent conversation ---\nUser: hi, I'm Ada\nYou: Nice to meet you, Ada." in ctx
+    convo = re.sub(r" \(e[0-9a-f]+\)", "", ctx)                       # lines carry message ids
+    assert "--- recent conversation ---\nUser: hi, I'm Ada\nYou: Nice to meet you, Ada." in convo
     recall = ctx.split("--- recent conversation ---")[1].split("--- inbox ---")[0]
     assert "what's my name?" not in recall                             # trigger not duplicated
     thread = agent.log.recent(agent.thread)

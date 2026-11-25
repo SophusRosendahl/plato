@@ -174,7 +174,8 @@ def test_chat_can_be_configured_like_any_channel(tmp_path):
         agent.wake()
     assert heard == ["one", "two", "three"]
     recall = ctx(model, call=2).split("--- recent conversation ---\n")[1].split("\n\n")[0]
-    assert recall.splitlines() == ["User: b", "You: two"]              # bounded to 2 turns
+    assert [ln.split(" (")[0] + ":" + ln.split("):")[1] for ln in recall.splitlines()] == [
+        "User: b", "You: two"]                                       # bounded to 2 turns
 
 
 def test_answer_only_when_asked_is_generic(tmp_path):

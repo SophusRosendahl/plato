@@ -17,6 +17,8 @@ import contextlib
 import datetime
 import io
 import json
+import sys
+import threading
 import traceback
 from dataclasses import dataclass
 
@@ -36,6 +38,51 @@ class ExecResult:
     status: str  # "continue" | "stop" | "error"
     output: str
     summary: str = ""
+
+
+# ── output capture, per thread ───────────────────────────────────────────
+# The agent's prints must become its tool output, but only the agent's: a web
+# server thread, a CLI input loop or a UI callback printing at the same moment
+# must reach the real terminal. `contextlib.redirect_stdout` swaps sys.stdout for
+# the whole process, so instead sys.stdout is wrapped once in a router that sends
+# each thread's writes to that thread's capture buffer, if it has one.
+_capture = threading.local()
+
+
+class _Router(io.TextIOBase):
+    def __init__(self, real) -> None:
+        self._real = real
+
+    def _target(self):
+        return getattr(_capture, "buf", None) or self._real
+
+    def write(self, s: str) -> int:
+        return self._target().write(s)
+
+    def flush(self) -> None:
+        self._target().flush()
+
+    def __getattr__(self, name):
+        return getattr(self._real, name)
+
+
+def _install_router() -> None:
+    if not isinstance(sys.stdout, _Router):
+        sys.stdout = _Router(sys.stdout)
+    if not isinstance(sys.stderr, _Router):
+        sys.stderr = _Router(sys.stderr)
+
+
+@contextlib.contextmanager
+def uncaptured():
+    """Run a block with real output even if called from inside agent code,
+    e.g. a channel delivering a message to a terminal UI."""
+    prev = getattr(_capture, "buf", None)
+    _capture.buf = None
+    try:
+        yield
+    finally:
+        _capture.buf = prev
 
 
 def _echo_value(value) -> None:
@@ -102,8 +149,12 @@ class Executor:
         status, summary = "continue", ""
         try:
             compiled = _compile_with_echo(_normalize(code))
-            with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
+            _install_router()
+            _capture.buf = buf
+            try:
                 exec(compiled, self.env)
+            finally:
+                _capture.buf = None
         except StopRun as s:
             status, summary = "stop", s.summary
         except Exception as e:

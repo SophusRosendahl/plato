@@ -66,8 +66,8 @@ class Channel:
 
     def act(
         self, artifact_id: str, artifact_type: str, surface: str, text: str, *,
-        parent_id: str | None = None, **payload,
-    ) -> Event:
+        op: str | None = None, parent_id: str | None = None, **payload,
+    ) -> Event | None:
         """Record the agent acting in this channel (e.g. its reply). Counts as
         the agent answering; the gate's self-trigger check stops it re-waking.
         Returns None, recording nothing, if this channel is held back on this
@@ -78,7 +78,7 @@ class Channel:
         self.agent.follow(artifact_id, artifact_type)
         ev = self.log.submit(
             artifact_id, actor_type="agent", actor_id=self.agent.agent_id, surface=surface,
-            parent_id=parent_id, payload={"text": text, **payload})
+            op=op, parent_id=parent_id, payload={"text": text, **payload})
         self.agent._emit("channel_reply", channel=self.name, artifact=artifact_id, text=text)
         return ev
 
