@@ -10,6 +10,7 @@ from plato.model import ModelTurn, OpenAICompatModel, ScriptedModel
 from plato.should_respond import Policy, Rule
 from plato.tails import FileReference, InReplyTo, PayloadField, RecentEvents
 from plato.tools import ToolRegistry, tool
+from plato.usage import Limits
 from plato.workspace import Workspace
 
 __all__ = [
@@ -22,6 +23,7 @@ __all__ = [
     "EventLog",
     "FileReference",
     "InReplyTo",
+    "Limits",
     "ModelTurn",
     "OpenAICompatModel",
     "PayloadField",

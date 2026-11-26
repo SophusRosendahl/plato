@@ -5,6 +5,7 @@
 
 Model: PLATO_MODEL="provider:model", e.g. anthropic:claude-opus-5-5,
 openai:gpt-5, ollama:llama3.3 (see plato.connect for every provider).
+Spend limit: PLATO_DAILY_TOKENS caps input + output tokens per day.
 """
 
 from __future__ import annotations
@@ -19,6 +20,7 @@ from pathlib import Path
 from plato.agent import Agent, Config
 from plato.chat import Chat
 from plato.connect import connect, providers
+from plato.usage import Limits
 
 try:
     import readline  # keeps your half-typed line intact when the agent prints
@@ -66,6 +68,7 @@ def _build_agent(args) -> Agent:
     return Agent(
         args.workspace, model,
         config=Config(max_steps=args.max_steps),
+        limits=Limits(daily_tokens=int(os.environ["PLATO_DAILY_TOKENS"])) if os.environ.get("PLATO_DAILY_TOKENS") else None,
         chat=Chat(on_message=lambda text: _say(f"{BOLD}{CYAN}agent ›{RESET} {text}")),
         on_event=_printer(args.verbose),
     )

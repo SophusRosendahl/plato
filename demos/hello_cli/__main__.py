@@ -11,7 +11,7 @@ from __future__ import annotations
 import argparse
 import threading
 
-from demos._shared.models import describe, make_model
+from demos._shared.models import describe, make_limits, make_model
 from plato import Agent, Chat
 
 try:
@@ -45,7 +45,7 @@ def main() -> None:
 
     model = make_model()
     agent = Agent(
-        args.workspace, model,
+        args.workspace, model, limits=make_limits(),
         chat=Chat(on_message=lambda text: say(f"{BOLD}{CYAN}agent ›{RESET} {text}")),
         on_event=on_event,
     )

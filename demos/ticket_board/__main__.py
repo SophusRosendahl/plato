@@ -28,7 +28,7 @@ import argparse
 import threading
 from pathlib import Path
 
-from demos._shared.models import describe, make_model
+from demos._shared.models import describe, make_limits, make_model
 from demos._shared.web import App, event_json
 from plato import WITHHELD, Agent, Channel, Event, RecentEvents, Rule, ToolRegistry
 
@@ -170,7 +170,7 @@ class Tickets(Channel):
 
 def build(workspace: str, model=None) -> tuple[Agent, Tickets, App]:
     tickets = Tickets()
-    agent = Agent(workspace, model or make_model(), agent_id="plato", chat=False, channels=[tickets])
+    agent = Agent(workspace, model or make_model(), limits=make_limits(), agent_id="plato", chat=False, channels=[tickets])
     app = App(HERE)
     me = "you"
 

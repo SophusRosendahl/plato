@@ -14,7 +14,7 @@ import os
 import re
 import time
 
-from plato import ModelTurn, connect
+from plato import Limits, ModelTurn, connect
 
 _HINT = re.compile(r"^→ Reply in: (.+)$")
 _ITEM = re.compile(r"^\[\d\d:\d\d\] ([^:]+): (.*)$")
@@ -27,6 +27,13 @@ def make_model(offline_delay: float | None = None):
         delay = offline_delay if offline_delay is not None else float(os.environ.get("PLATO_OFFLINE_DELAY", "2"))
         return OfflineModel(delay=delay)
     return connect(name)
+
+
+def make_limits() -> Limits:
+    """A daily token cap for the demos (default 300k; PLATO_DAILY_TOKENS to change,
+    0 for none). The offline model reports no usage, so it never hits it."""
+    cap = int(os.environ.get("PLATO_DAILY_TOKENS", "300000"))
+    return Limits(daily_tokens=cap or None)
 
 
 def describe(model) -> str:

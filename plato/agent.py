@@ -43,6 +43,7 @@ from plato.executor import Executor, StopRun, uncaptured
 from plato.model import Model
 from plato.should_respond import Policy
 from plato.tools import ToolRegistry, default_registry
+from plato.usage import Limits, Usage
 from plato.workspace import InboxItem, Workspace
 
 
@@ -59,7 +60,7 @@ class Config:
 
 @dataclass
 class WakeResult:
-    outcome: str  # stopped | stop_guard_exhausted | budget_exhausted | stuck | error
+    outcome: str  # stopped | stop_guard_exhausted | budget_exhausted | stuck | error | over_limit
     steps: int
     actions: list[dict] = field(default_factory=list)  # what the agent did in each channel
     summary: str = ""
@@ -105,6 +106,7 @@ class Agent:
         chat: bool | Chat = True,
         log: EventLog | None = None,
         policy: Policy | None = None,
+        limits: Limits | None = None,
         agent_id: str = "agent",
         human_id: str = "user",
         on_event: Callable[[str, dict], None] | None = None,
@@ -124,6 +126,9 @@ class Agent:
         self.busy = False  # True while a wake is running (for UIs: "thinking…")
         self._consumed: set[str] = set()  # inbox items this wake took
         self.error_streak = 0             # consecutive wakes that failed (model down, bad key…)
+        # Spend limits, checked before every model call; usage persists in the workspace.
+        self.usage = Usage(self.ws.root / "usage.json", limits)
+        self._limit_noticed: str | None = None  # the day we last told the person
         self._dispatch_log: list[Dispatched] = []
         self.registry = self._builtin_tools()
         self.registry.extend(default_registry)
@@ -187,6 +192,10 @@ class Agent:
         inbox = self.pending_inbox()
         if not inbox and not (force and self.ws.active_todos()):
             return None
+        over = self.usage.exceeded()
+        if over:  # leave the inbox untouched: it's handled once there's budget again
+            self._limit_reached(over, started=False)
+            return WakeResult("over_limit", 0, summary=over)
         return self._run(inbox)
 
     def serve(self, stop: threading.Event | None = None, poll: float = 2.0) -> None:
@@ -203,6 +212,8 @@ class Agent:
             elif result.outcome == "error":
                 # Back off instead of hammering a provider that is down: 5s, 10s, … 5 min.
                 stop.wait(min(5 * 2 ** (self.error_streak - 1), 300))
+            elif result.outcome == "over_limit":
+                stop.wait(60)  # nothing to do until the limit resets (or is raised)
 
     # ── the loop ─────────────────────────────────────────────────────────
     def _run(self, inbox) -> WakeResult:
@@ -272,7 +283,14 @@ class Agent:
                 self._emit("guard", name="budget_wrap_up", steps_left=budget - used + 1)
 
             messages = trim_history(messages, cfg.history_max_messages)
+            over = self.usage.exceeded()
+            if over:  # checked before every model call, so a long run can't blow through it
+                self._limit_reached(over, started=True)
+                ws.log(f"(stopped mid-run: {over})")
+                self._emit("end", outcome="over_limit")
+                return self._result("over_limit", step, over)
             turn = self.model.complete(messages, self.tool_schema)
+            self.usage.record(turn.usage)
             if turn.code is None:
                 messages.append({"role": "assistant", "content": turn.text or "",
                                  **({"_native": turn.native} if turn.native else {})})
@@ -353,6 +371,15 @@ class Agent:
         ws.log("(ran out of steps with no progress)")
         self._emit("end", outcome="budget_exhausted", no_progress_wakes=self._no_progress_wakes)
         return self._result("budget_exhausted", step)
+
+    def _limit_reached(self, reason: str, started: bool) -> None:
+        self._emit("over_limit", reason=reason, mid_run=started)
+        today = datetime.now().date().isoformat()
+        if self._limit_noticed != today:  # once a day, not on every message
+            self._limit_noticed = today
+            self._notify(f"I've paused: {reason}. "
+                         + ("I stopped partway; " if started else "")
+                         + "new messages will wait until the limit resets tomorrow or is raised.")
 
     def _failed(self, error: Exception) -> WakeResult:
         """A wake crashed (usually the model call: bad key, provider down).
