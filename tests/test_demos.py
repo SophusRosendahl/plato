@@ -14,6 +14,8 @@ from demos._shared.models import OfflineModel
 from demos._shared.web import start_in_background
 from demos.browser_chat.__main__ import build as build_chat
 from demos.comment_section.__main__ import build as build_comments
+from demos.ticket_board.__main__ import build as build_tickets
+from plato import ScriptedModel
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -117,3 +119,41 @@ def test_comment_section_wakes_only_when_tagged(tmp_path):
         assert set(c.get("/api/state")["woke"]) == {tag["id"], follow["id"]}
     finally:
         c.close()
+
+
+def test_ticket_board_wakes_on_assignment_and_on_comments_to_its_own_tickets(tmp_path):
+    agent, tickets, app = build_tickets(str(tmp_path / "ws"), OfflineModel(delay=0))
+    other = tickets.create("Q3 retro notes", "collect action items", "you")
+    tickets.edit(other, "collect action items, by Friday", "you")
+    tickets.comment(other, "anyone?", "you")
+    assert agent.wake() is None                                      # nothing assigned to it: no wake
+    mine = tickets.create("Launch checklist", "for the pricing page", "you", assignee="plato")
+    assert agent.wake().outcome == "stopped"
+    assert tickets.ticket(mine)["status"] == "review"                # picked up, worked, handed back
+    tickets.move(mine, "done", "you")
+    assert agent.wake() is None                                      # people moving tickets is logged only
+    tickets.comment(mine, "add a rollback step", "you")
+    assert agent.wake() is not None                                  # feedback on its ticket wakes it
+    tickets.assign(mine, None, "you")
+    tickets.comment(mine, "still there?", "you")
+    assert agent.wake() is None                                      # unassigned: no longer its business
+
+
+def test_ticket_deliverables_are_attached_and_done_is_left_to_people(tmp_path):
+    model = ScriptedModel([
+        "update_ticket('T-1', comment='Drafting it.', status='in_progress')\n"
+        "print(update_ticket('T-1', attach='tickets/T-1/missing.md'))",
+        "write_file('tickets/T-1/checklist.md', '- copy review\\n- rollback plan')\n"
+        "update_ticket('T-1', attach='tickets/T-1/checklist.md')\n"
+        "print(update_ticket('T-1', status='done'))",
+        "update_ticket('T-1', comment='Checklist attached.', status='review'); stop('handed back')",
+    ])
+    agent, tickets, _ = build_tickets(str(tmp_path / "ws"), model)
+    tickets.create("Launch checklist", "one page", "you", assignee="plato")
+    r = agent.wake()
+    assert r.outcome == "stopped"
+    t = tickets.ticket("T-1")
+    assert t["attachments"] == ["tickets/T-1/checklist.md"] and t["status"] == "review"
+    outputs = [m["content"] for m in model.calls[1] + model.calls[2] if m["role"] == "tool"]
+    assert any("no file 'tickets/T-1/missing.md'" in o for o in outputs)
+    assert any("people move them to done" in o for o in outputs)

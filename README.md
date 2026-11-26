@@ -24,6 +24,7 @@ State is a folder of plain files (`memory.md`, `todo.md`, `daily_log.md`,
 python -m demos.hello_cli         # an always-on agent in your terminal; type while it thinks
 python -m demos.browser_chat      # chat in the browser with reply-to and emoji reactions
 python -m demos.comment_section   # a blog's comment section; tag @plato and it answers
+python -m demos.ticket_board      # no chat: assign tickets to the agent and review its work
 ```
 
 They run without an API key on an offline stand-in model; set `PLATO_MODEL` for

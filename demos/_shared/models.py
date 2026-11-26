@@ -85,6 +85,8 @@ def _ack(items: list[tuple[str, str]], tools: str) -> str:
         target = _ID.search(label) or _ID.search(hint)
         if hint.startswith("reply("):
             acks.append(f"reply({('Thinking about “' + _short(text) + '”…')!r})")
+        elif "status='review'" in hint:  # a work item: pick it up first
+            acks.append(hint.replace("'...'", repr("Picking this up.")).replace("'review'", "'in_progress'"))
         elif target and "react(" in tools:
             acks.append(f"react({target.group(1)!r}, '👀')")
     return "\n".join(acks) or "print('thinking')"

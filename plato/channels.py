@@ -55,11 +55,16 @@ class Channel:
     def receive(
         self, artifact_id: str, artifact_type: str, surface: str, text: str, *,
         actor_id: str | None = None, actor_type: str = "human", op: str | None = None,
-        parent_id: str | None = None, **payload,
+        parent_id: str | None = None, follow: bool = True, **payload,
     ) -> Event:
         """Record something that happened in this channel (a person's action, a
-        webhook…). The agent follows the artifact so the gate sees the event."""
-        self.agent.follow(artifact_id, artifact_type)
+        webhook…). By default the agent follows the artifact so the gate sees
+        the event; pass follow=False to record it without subscribing (e.g. a
+        ticket the agent isn't assigned to)."""
+        if follow:
+            self.agent.follow(artifact_id, artifact_type)
+        else:
+            self.log.ensure_artifact(artifact_id, artifact_type)
         return self.log.submit(
             artifact_id, actor_type=actor_type, actor_id=actor_id or self.agent.human_id,
             surface=surface, op=op, parent_id=parent_id, payload={"text": text, **payload})
