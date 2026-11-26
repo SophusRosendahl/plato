@@ -125,7 +125,10 @@ class EventLog:
         # Each participant's gate policy (its rules). Several agents can share
         # one log with different rules; unregistered participants get Policy().
         self._policies: dict[str, Policy] = {}
+        # One connection shared by every thread (an agent's loop, a web server,
+        # a CLI input thread): all access goes through this lock.
         self._lock = threading.RLock()
+        self._changed = threading.Condition(self._lock)
         self._db = sqlite3.connect(self.path, check_same_thread=False, isolation_level=None)
         self._db.row_factory = sqlite3.Row
         self._db.execute("PRAGMA journal_mode=WAL")
@@ -139,9 +142,13 @@ class EventLog:
                 (artifact_id, type, owner_id, _now()),
             )
 
+    def _query(self, sql: str, args=()) -> list[sqlite3.Row]:
+        with self._lock:
+            return self._db.execute(sql, args).fetchall()
+
     def artifact_type(self, artifact_id: str) -> str:
-        row = self._db.execute("SELECT type FROM artifacts WHERE artifact_id=?", (artifact_id,)).fetchone()
-        return row["type"] if row else "unknown"
+        rows = self._query("SELECT type FROM artifacts WHERE artifact_id=?", (artifact_id,))
+        return rows[0]["type"] if rows else "unknown"
 
     def submit(
         self,
@@ -171,6 +178,7 @@ class EventLog:
                 (event_id, artifact_id, actor_type, actor_id, surface, op, parent_id, visibility,
                  json.dumps(payload or {}), _now()),
             )
+            self._changed.notify_all()
         return self.get(event_id)
 
     # ── participants ─────────────────────────────────────────────────────
@@ -191,7 +199,7 @@ class EventLog:
                              (participant_id, artifact_id))
 
     def subscribers(self, artifact_id: str) -> list[str]:
-        rows = self._db.execute("SELECT participant_id FROM subscriptions WHERE artifact_id=?", (artifact_id,))
+        rows = self._query("SELECT participant_id FROM subscriptions WHERE artifact_id=?", (artifact_id,))
         return [r["participant_id"] for r in rows]
 
     # ── read path ────────────────────────────────────────────────────────
@@ -204,10 +212,10 @@ class EventLog:
         return ev
 
     def get(self, event_id: str) -> Event:
-        row = self._db.execute("SELECT * FROM events WHERE event_id=?", (event_id,)).fetchone()
-        if row is None:
+        rows = self._query("SELECT * FROM events WHERE event_id=?", (event_id,))
+        if not rows:
             raise KeyError(event_id)
-        return self._event(row)
+        return self._event(rows[0])
 
     def recent(
         self, artifact_id: str, limit: int = 20, surfaces: tuple[str, ...] | None = None,
@@ -218,13 +226,33 @@ class EventLog:
         if surfaces:
             sql += f" AND surface IN ({','.join('?' * len(surfaces))})"
             args += list(surfaces)
-        rows = [self._event(r) for r in self._db.execute(sql + " ORDER BY seq DESC", args)]
+        rows = [self._event(r) for r in self._query(sql + " ORDER BY seq DESC", args)]
         rows = [e for e in rows if not exclude or e.event_id not in exclude]
         return list(reversed(rows[:limit]))
 
     def count(self, artifact_id: str, surfaces: tuple[str, ...] | None = None,
               exclude: set[str] | None = None) -> int:
         return len(self.recent(artifact_id, limit=10**9, surfaces=surfaces, exclude=exclude))
+
+    def last_seq(self) -> int:
+        rows = self._query("SELECT COALESCE(MAX(seq), 0) AS s FROM events")
+        return rows[0]["s"]
+
+    def events_after(self, seq: int, artifact_ids: list[str] | None = None) -> list[Event]:
+        """Every event after `seq` (optionally on some artifacts), oldest first.
+        For UIs that follow the log."""
+        sql, args = "SELECT * FROM events WHERE seq>?", [seq]
+        if artifact_ids:
+            sql += f" AND artifact_id IN ({','.join('?' * len(artifact_ids))})"
+            args += list(artifact_ids)
+        return [self._event(r) for r in self._query(sql + " ORDER BY seq", args)]
+
+    def wait_for_events(self, after_seq: int, timeout: float | None = None) -> bool:
+        """Block until an event newer than `after_seq` exists (True) or the
+        timeout passes (False). Wakes immediately on submits in this process;
+        the timeout doubles as a poll for writers in other processes."""
+        with self._changed:
+            return self._changed.wait_for(lambda: self.last_seq() > after_seq, timeout)
 
     # ── dispatcher ───────────────────────────────────────────────────────
     def dispatch_once(self, cursor: str = "dispatcher") -> list[Dispatched]:
@@ -254,10 +282,17 @@ class EventLog:
 
     # ── inbox (derived from the log) ─────────────────────────────────────
     def pending_inbox(self, participant_id: str) -> list[Event]:
-        rows = self._db.execute(
+        rows = self._query(
             "SELECT e.*, i.reply_surface, i.reason FROM inbox_items i JOIN events e USING (event_id)"
             " WHERE i.participant_id=? AND i.done=0 ORDER BY e.seq", (participant_id,))
         return [self._event(r) for r in rows]
+
+    def mark_undone(self, participant_id: str, event_ids: set[str]) -> None:
+        """Put items back in the inbox (e.g. a wake failed before acting on them)."""
+        with self._lock:
+            self._db.executemany(
+                "UPDATE inbox_items SET done=0 WHERE participant_id=? AND event_id=?",
+                [(participant_id, eid) for eid in event_ids])
 
     def mark_done(self, participant_id: str, event_ids: set[str]) -> None:
         """Flip exactly the items the participant was shown; anything that

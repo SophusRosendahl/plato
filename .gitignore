@@ -1,4 +1,11 @@
 __pycache__/
+*.py[cod]
 .pytest_cache/
-workspace/
+.ruff_cache/
+.venv/
+venv/
+build/
+dist/
 *.egg-info/
+workspace/
+.env

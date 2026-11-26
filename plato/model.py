@@ -15,12 +15,6 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Callable, Protocol
 
-try:
-    import openai
-except ImportError:  # optional: only needed for live models
-    openai = None
-
-
 @dataclass
 class ModelTurn:
     code: str | None
@@ -28,6 +22,9 @@ class ModelTurn:
     text: str = ""
     call_id: str = field(default_factory=lambda: "call_" + uuid.uuid4().hex[:10])
     usage: dict = field(default_factory=dict)
+    # The provider's own form of this turn ({"provider": ..., "content": ...}),
+    # kept so an adapter can replay it unchanged (e.g. Claude's thinking blocks).
+    native: dict | None = None
 
 
 class Model(Protocol):
@@ -56,8 +53,10 @@ class OpenAICompatModel:
         max_tokens: int = 4096,
         temperature: float | None = None,
     ) -> None:
-        if openai is None:
-            raise RuntimeError("pip install openai to use OpenAICompatModel")
+        try:  # optional dependency, loaded only when an OpenAI-compatible model is used
+            import openai  # noqa: PLC0415
+        except ImportError as e:
+            raise RuntimeError("pip install openai to use OpenAICompatModel") from e
         self.model = model
         self.max_tokens = max_tokens
         self.temperature = temperature
@@ -66,7 +65,7 @@ class OpenAICompatModel:
     def complete(self, messages: list[dict], tool: dict) -> ModelTurn:
         kwargs = dict(
             model=self.model,
-            messages=messages,
+            messages=[{k: v for k, v in m.items() if not k.startswith("_")} for m in messages],
             tools=[tool],
             tool_choice={"type": "function", "function": {"name": tool["function"]["name"]}},
             max_tokens=self.max_tokens,

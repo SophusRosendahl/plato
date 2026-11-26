@@ -1,0 +1,201 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Crumb &amp; Crust · Sourdough for impatient people</title>
+<style>
+  :root {
+    --bg: #fbf8f2; --paper: #ffffff; --ink: #221f1a; --muted: #7c7468; --line: #ebe4d8;
+    --accent: #a3532b; --accent-soft: #f6e6dc; --mention: #8a3f1c; --plato: #3b5b4d; --plato-soft: #e5eee9;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #171512; --paper: #1f1c18; --ink: #efe9df; --muted: #a39a8c; --line: #322d27;
+      --accent: #d98a5f; --accent-soft: #3a271d; --mention: #f0a77d; --plato: #8cc1a8; --plato-soft: #1f2e27; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink); font: 17px/1.65 Georgia, "Iowan Old Style", serif; }
+  .site { max-width: 720px; margin: 0 auto; padding: 0 20px 80px; }
+  nav { display: flex; justify-content: space-between; align-items: center; padding: 18px 0; border-bottom: 1px solid var(--line);
+        font: 600 14px/1 system-ui, sans-serif; letter-spacing: .08em; text-transform: uppercase; }
+  nav span { color: var(--muted); font-weight: 400; letter-spacing: 0; text-transform: none; }
+  article h1 { font-size: 38px; line-height: 1.15; margin: 40px 0 8px; }
+  .byline { color: var(--muted); font: 14px system-ui, sans-serif; margin-bottom: 28px; }
+  article h2 { font-size: 22px; margin: 32px 0 8px; }
+  article li { margin: 6px 0; }
+  .ui { font-family: system-ui, -apple-system, "Segoe UI", sans-serif; font-size: 15px; line-height: 1.5; }
+  section.comments { margin-top: 56px; border-top: 2px solid var(--ink); padding-top: 20px; }
+  .comments h2 { font: 700 20px system-ui, sans-serif; margin: 0 0 4px; }
+  .comments .sub { color: var(--muted); font-size: 14px; margin-bottom: 18px; }
+  .composer { background: var(--paper); border: 1px solid var(--line); border-radius: 12px; padding: 12px; margin-bottom: 24px; }
+  .composer.inline { margin: 10px 0 4px; }
+  .composer .who { display: flex; gap: 8px; align-items: center; color: var(--muted); font-size: 13px; margin-bottom: 8px; }
+  .composer input[name=author] { font: inherit; border: 1px solid var(--line); border-radius: 6px; padding: 3px 8px; width: 140px; background: var(--bg); color: var(--ink); }
+  textarea { width: 100%; min-height: 64px; resize: vertical; font: inherit; border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; background: var(--bg); color: var(--ink); }
+  textarea:focus, input:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+  .composer .bar { display: flex; justify-content: space-between; align-items: center; margin-top: 8px; gap: 8px; }
+  .composer .tip { color: var(--muted); font-size: 13px; }
+  button { font: inherit; cursor: pointer; border-radius: 8px; border: 1px solid var(--line); background: var(--paper); color: var(--ink); padding: 5px 12px; }
+  button.primary { background: var(--accent); color: #fff; border-color: transparent; }
+  .thread { margin-bottom: 18px; }
+  .c { display: grid; grid-template-columns: 36px 1fr; gap: 10px; }
+  .replies { margin: 10px 0 0 46px; display: flex; flex-direction: column; gap: 12px; }
+  .av { width: 36px; height: 36px; border-radius: 50%; display: grid; place-items: center; color: #fff; font-weight: 700; font-size: 15px; }
+  .av.plato { background: var(--plato-soft); font-size: 20px; }
+  .meta { font-size: 13px; color: var(--muted); display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; }
+  .meta b { color: var(--ink); font-size: 14px; }
+  .badge { font-size: 11px; background: var(--plato-soft); color: var(--plato); padding: 0 7px; border-radius: 99px; }
+  .notified { font-size: 11px; color: var(--plato); }
+  .body { white-space: pre-wrap; word-wrap: break-word; margin: 2px 0 4px; }
+  .mention { color: var(--mention); font-weight: 600; }
+  .actions { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+  .actions button { border: none; background: none; color: var(--muted); padding: 0 4px; font-size: 13px; }
+  .actions button:hover { color: var(--accent); }
+  .chip { font-size: 13px; background: var(--accent-soft); border-radius: 99px; padding: 0 8px; cursor: pointer; }
+  .chip.plato { background: var(--plato-soft); }
+  .picker { display: none; gap: 2px; }
+  .picker.on { display: inline-flex; }
+  .writing { color: var(--plato); font-size: 14px; min-height: 22px; margin-bottom: 8px; }
+  footer { color: var(--muted); font: 13px system-ui, sans-serif; margin-top: 40px; }
+</style>
+</head>
+<body>
+<div class="site">
+  <nav><div>Crumb &amp; Crust</div><span id="model" class="ui">connecting…</span></nav>
+  <article id="article"></article>
+
+  <section class="comments ui" aria-label="Comments">
+    <h2 id="count">Comments</h2>
+    <div class="sub">Tag <span class="mention">@plato</span> to ask the blog's assistant. Untagged comments don't wake it, but it reads them when it's tagged.</div>
+    <div class="writing" id="writing" aria-live="polite"></div>
+    <form class="composer" id="mainForm">
+      <div class="who">Commenting as <input name="author" id="author" aria-label="Your name"></div>
+      <textarea name="text" placeholder="@plato can I bake this without a Dutch oven?" aria-label="Comment"></textarea>
+      <div class="bar"><span class="tip">Try a comment with and without @plato.</span><button class="primary" type="submit">Post</button></div>
+    </form>
+    <div id="threads"></div>
+  </section>
+  <footer class="ui">A plato demo. Comments are events on an append-only log; the agent is woken only by comments that tag it.</footer>
+</div>
+<script>
+const EMOJI = ["👍", "❤️", "😂", "🎉", "👀"];
+const NAMES = ["maria", "jonas", "aiko", "sam", "lena", "omar"];
+const COLORS = ["#a3532b", "#5b6f9e", "#7b5ea7", "#3f8a6e", "#b0803a", "#9e4f6e"];
+const st = { after: 0, comments: new Map(), order: [], reactions: new Map(), woke: new Set(), open: null };
+const $ = (id) => document.getElementById(id);
+const esc = (s) => s.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+
+const author = $("author");
+author.value = (() => { try { return localStorage.getItem("author") } catch { return null } })() || NAMES[Math.floor(Math.random() * NAMES.length)];
+author.onchange = () => { try { localStorage.setItem("author", author.value) } catch {} };
+
+function md(text) {  // just enough markdown for the article
+  const out = []; let list = false;
+  for (const raw of text.split("\n\n")) {
+    const block = raw.trim(); if (!block) continue;
+    const inline = (s) => esc(s).replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>");
+    if (block.startsWith("# ")) out.push(`<h1>${inline(block.slice(2))}</h1><div class="byline">by the Crumb &amp; Crust kitchen · 4 min read</div>`);
+    else if (block.startsWith("## ")) out.push(`<h2>${inline(block.slice(3))}</h2>`);
+    else if (block.startsWith("- ")) out.push("<ul>" + block.split(/\n(?=- )/).map((li) => `<li>${inline(li.slice(2).replace(/\n\s*/g, " "))}</li>`).join("") + "</ul>");
+    else out.push(`<p>${inline(block.replace(/\n/g, " "))}</p>`);
+  }
+  return out.join("");
+}
+
+function colorFor(name) { let h = 0; for (const ch of name) h = (h * 31 + ch.charCodeAt(0)) >>> 0; return COLORS[h % COLORS.length]; }
+function when(iso) { const d = new Date(iso); return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }); }
+
+async function post(path, body) {
+  await fetch(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+  poll();
+}
+
+function composer(replyTo) {
+  const f = document.createElement("form");
+  f.className = "composer inline";
+  f.innerHTML = `<textarea placeholder="Reply… (tag @plato to bring in the assistant)" aria-label="Reply"></textarea>
+    <div class="bar"><span class="tip"></span><span><button type="button" data-cancel>Cancel</button> <button class="primary" type="submit">Reply</button></span></div>`;
+  f.querySelector("[data-cancel]").onclick = () => { st.open = null; render(); };
+  f.onsubmit = (e) => { e.preventDefault(); const t = f.querySelector("textarea").value.trim(); if (!t) return;
+    post("/api/comment", { author: author.value, text: t, reply_to: replyTo }); st.open = null; };
+  setTimeout(() => f.querySelector("textarea").focus());
+  return f;
+}
+
+function commentEl(c) {
+  const isPlato = c.actor_type === "agent";
+  const el = document.createElement("div");
+  el.className = "c"; el.id = "c-" + c.id;
+  el.innerHTML = `<div class="av ${isPlato ? "plato" : ""}" style="${isPlato ? "" : "background:" + colorFor(c.actor)}">${isPlato ? "🦉" : esc(c.actor[0].toUpperCase())}</div>
+    <div><div class="meta"><b>${esc(c.actor)}</b>${isPlato ? '<span class="badge">assistant</span>' : ""}<span>${when(c.at)}</span>
+      ${st.woke.has(c.id) ? '<span class="notified">🦉 plato notified</span>' : ""}</div>
+      <div class="body">${esc(c.text).replace(/@([A-Za-z0-9_]+)/g, '<span class="mention">@$1</span>')}</div>
+      <div class="actions"></div></div>`;
+  const actions = el.querySelector(".actions");
+  const counts = new Map();
+  for (const r of st.reactions.get(c.id) || []) {
+    const k = counts.get(r.op) || { n: 0, plato: false, who: [] };
+    k.n++; k.plato = k.plato || r.actor_type === "agent"; k.who.push(r.actor); counts.set(r.op, k);
+  }
+  for (const [emoji, k] of counts) {
+    const chip = document.createElement("span");
+    chip.className = "chip" + (k.plato ? " plato" : ""); chip.textContent = `${emoji} ${k.n}`; chip.title = k.who.join(", ");
+    chip.onclick = () => post("/api/react", { id: c.id, emoji, author: author.value });
+    actions.appendChild(chip);
+  }
+  const reply = document.createElement("button"); reply.type = "button"; reply.textContent = "Reply";
+  reply.onclick = () => { st.open = c.parent_id || c.id; render(); };
+  const react = document.createElement("button"); react.type = "button"; react.textContent = "React"; react.setAttribute("aria-expanded", "false");
+  const picker = document.createElement("span"); picker.className = "picker";
+  for (const e of EMOJI) { const b = document.createElement("button"); b.type = "button"; b.textContent = e; b.title = "React " + e;
+    b.onclick = () => post("/api/react", { id: c.id, emoji: e, author: author.value }); picker.appendChild(b); }
+  react.onclick = () => { const on = picker.classList.toggle("on"); react.setAttribute("aria-expanded", String(on)); };
+  actions.append(reply, react, picker);
+  return el;
+}
+
+function render() {
+  const box = $("threads"); box.innerHTML = "";
+  const roots = st.order.map((id) => st.comments.get(id)).filter((c) => !c.parent_id);
+  $("count").textContent = `${st.order.length} comment${st.order.length === 1 ? "" : "s"}`;
+  for (const root of roots.slice().reverse()) {
+    const t = document.createElement("div"); t.className = "thread";
+    t.appendChild(commentEl(root));
+    const replies = document.createElement("div"); replies.className = "replies";
+    for (const id of st.order) { const c = st.comments.get(id); if (c.parent_id === root.id) replies.appendChild(commentEl(c)); }
+    if (st.open === root.id) replies.appendChild(composer(root.id));
+    if (replies.children.length) t.appendChild(replies);
+    box.appendChild(t);
+  }
+}
+
+let polling = false;
+async function poll() {
+  if (polling) return; polling = true;
+  try {
+    const data = await (await fetch(`/api/state?after=${st.after}`)).json();
+    let changed = false;
+    for (const ev of data.events) {
+      changed = true;
+      if (ev.surface === "comment") { st.comments.set(ev.id, ev); st.order.push(ev.id); }
+      if (ev.surface === "reaction") { const l = st.reactions.get(ev.parent_id) || []; l.push(ev); st.reactions.set(ev.parent_id, l); }
+    }
+    for (const id of data.woke) if (!st.woke.has(id)) { st.woke.add(id); changed = true; }
+    st.after = data.last_seq;
+    $("model").textContent = data.model;
+    $("writing").textContent = data.busy ? "🦉 plato is writing a reply…" : "";
+    const typing = document.activeElement && document.activeElement.tagName === "TEXTAREA" && document.activeElement.closest(".inline");
+    if (changed && !typing) render();
+  } catch { $("model").textContent = "server stopped"; }
+  finally { polling = false; }
+}
+
+$("mainForm").onsubmit = (e) => {
+  e.preventDefault(); const ta = e.target.querySelector("textarea"); const t = ta.value.trim(); if (!t) return;
+  post("/api/comment", { author: author.value, text: t }); ta.value = "";
+};
+fetch("/api/article").then((r) => r.json()).then((d) => { $("article").innerHTML = md(d.markdown); });
+poll(); setInterval(poll, 800);
+</script>
+</body>
+</html>

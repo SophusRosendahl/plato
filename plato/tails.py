@@ -81,3 +81,26 @@ class FileReference:
             return ""
         body = f.read_text(encoding="utf-8", errors="replace")
         return render("tail_file_reference", PATH=path, CHARS=len(body), LINES=body.count("\n") + 1)
+
+
+@dataclass(frozen=True)
+class InReplyTo:
+    """If the event replies to another one (`parent_id`), show that one, so
+    "yes, do that" arrives with what "that" was."""
+
+    max_chars: int = 400
+
+    def render(self, channel: Channel, item: InboxItem) -> str:
+        parent_id = item.meta.get("parent_id")
+        if not parent_id:
+            return ""
+        try:
+            parent = channel.log.get(parent_id)
+        except KeyError:
+            return ""
+        me = parent.actor_type == "agent" and parent.actor_id == channel.agent.agent_id
+        who = "you" if me else parent.actor_id
+        body = " ".join(parent.text.split())
+        if len(body) > self.max_chars:
+            body = body[: self.max_chars - 1] + "…"
+        return f"In reply to {who} ({parent.event_id}): {body}"

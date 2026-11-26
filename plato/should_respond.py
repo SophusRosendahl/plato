@@ -38,8 +38,9 @@ class Rule:
     `respond=True` wakes the participant; `answer` says where its response
     belongs: `"artifact"` (the channel that owns the event's artifact type), or
     the name of a channel to route to instead (e.g. a chat message typed in a
-    file's sidebar can still be answered in `"chat"`). `reason` is the tag the
-    decision reports.
+    file's sidebar can still be answered in `"chat"`). `addressed=True` makes the
+    rule match only events that name this participant in `payload["to"]` (how
+    an @-mention is expressed). `reason` is the tag the decision reports.
     """
 
     surface: str
@@ -47,13 +48,16 @@ class Rule:
     answer: str = ON_ARTIFACT
     op: str = ANY
     actor_type: str = ANY
+    addressed: bool = False
     reason: str = ""
 
-    def matches(self, surface: str | None, op: str | None, actor_type: str | None) -> bool:
+    def matches(self, surface: str | None, op: str | None, actor_type: str | None,
+                addressed_to_me: bool = False) -> bool:
         return (
             self.surface in (ANY, surface)
             and self.op in (ANY, op)
             and self.actor_type in (ANY, actor_type)
+            and (addressed_to_me or not self.addressed)
         )
 
 
@@ -115,13 +119,13 @@ def should_respond(
         return _no("not-subscribed")
     if not _visible_to(event, participant):
         return _no("not-visible")
-    addressed = payload.get("to")
-    if addressed and participant.id not in set(addressed):
+    addressed = set(payload.get("to") or ())
+    if addressed and participant.id not in addressed:
         return _no("addressed-to-others")
 
     # ── rules: first match wins ──
     for rule in policy.rules:
-        if rule.matches(surface, op, actor_type):
+        if rule.matches(surface, op, actor_type, participant.id in addressed):
             reason = rule.reason or f"{surface}{'/' + op if op else ''}"
             if not rule.respond:
                 return _no(reason)

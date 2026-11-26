@@ -1,0 +1,159 @@
+"""The demos in demos/ work end to end, driven through their real interfaces
+(HTTP API, terminal) with the offline stand-in model."""
+
+import json
+import os
+import subprocess
+import sys
+import threading
+import time
+import urllib.request
+from pathlib import Path
+
+from demos._shared.models import OfflineModel
+from demos._shared.web import start_in_background
+from demos.browser_chat.__main__ import build as build_chat
+from demos.comment_section.__main__ import build as build_comments
+from demos.ticket_board.__main__ import build as build_tickets
+from plato import ScriptedModel
+
+ROOT = Path(__file__).resolve().parent.parent
+
+
+def wait_until(pred, timeout=10.0):
+    end = time.time() + timeout
+    while time.time() < end:
+        value = pred()
+        if value:
+            return value
+        time.sleep(0.05)
+    raise AssertionError("timed out")
+
+
+class Client:
+    def __init__(self, app, agent):
+        self.server = app.serve(port=0)
+        start_in_background(self.server)
+        self.base = f"http://127.0.0.1:{self.server.server_address[1]}"
+        self.stop = threading.Event()
+        threading.Thread(target=agent.serve, kwargs={"stop": self.stop, "poll": 0.1}, daemon=True).start()
+
+    def get(self, path):
+        with urllib.request.urlopen(self.base + path, timeout=5) as r:
+            return json.loads(r.read())
+
+    def post(self, path, body):
+        req = urllib.request.Request(self.base + path, data=json.dumps(body).encode(),
+                                     headers={"Content-Type": "application/json"}, method="POST")
+        with urllib.request.urlopen(req, timeout=5) as r:
+            return json.loads(r.read())
+
+    def events(self):
+        return self.get("/api/state?after=0")["events"]
+
+    def close(self):
+        self.stop.set()
+        self.server.shutdown()
+
+
+def test_hello_cli_answers_and_takes_follow_ups_mid_thought(tmp_path):
+    env = {**os.environ, "PLATO_OFFLINE_DELAY": "1.5"}
+    env.pop("PLATO_MODEL", None)
+    proc = subprocess.Popen([sys.executable, "-m", "demos.hello_cli", "--workspace", str(tmp_path / "ws")],
+                            cwd=ROOT, env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+    seen: list[str] = []
+    threading.Thread(target=lambda: seen.extend(iter(proc.stdout.readline, "")), daemon=True).start()
+    proc.stdin.write("hello there\n")
+    proc.stdin.flush()
+    wait_until(lambda: any("Thinking about" in line for line in seen))   # it's mid-thought now
+    proc.stdin.write("and a follow-up\n")
+    proc.stdin.flush()
+    wait_until(lambda: any("dormant" in line for line in seen), timeout=20)
+    proc.stdin.close()
+    proc.wait(timeout=10)
+    out = "".join(seen)
+    assert "I read: “hello there”" in out
+    assert "Also got: “and a follow-up”" in out                      # joined the same wake
+    assert out.count("awake") == 1
+
+
+def test_browser_chat_replies_and_reactions(tmp_path):
+    agent, app = build_chat(str(tmp_path / "ws"), OfflineModel(delay=0))
+    c = Client(app, agent)
+    try:
+        c.post("/api/send", {"text": "plan a trip to Lisbon"})
+        answer = wait_until(lambda: [e for e in c.events() if e["actor_type"] == "agent" and "I read" in e["text"]])[0]
+        mine = c.post("/api/send", {"text": "book the first option", "reply_to": answer["id"]})
+        wait_until(lambda: [e for e in c.events() if e["parent_id"] == mine["id"] and e["actor_type"] == "agent"])
+        n = len([e for e in c.events() if e["actor_type"] == "agent"])
+        c.post("/api/react", {"id": answer["id"], "emoji": "👍"})
+        time.sleep(0.5)
+        assert len([e for e in c.events() if e["actor_type"] == "agent"]) == n   # 👍 is logged only
+        c.post("/api/react", {"id": answer["id"], "emoji": "❓"})
+        wait_until(lambda: len([e for e in c.events() if e["actor_type"] == "agent"]) > n)
+        reasons = {g["reason"] for g in c.get("/api/state")["gates"]}
+        assert {"chat-message", "no-rule", "reaction-❓"} <= reasons
+    finally:
+        c.close()
+
+
+def test_comment_section_wakes_only_when_tagged(tmp_path):
+    agent, comments, app = build_comments(str(tmp_path / "ws"), OfflineModel(delay=0))
+    c = Client(app, agent)
+    try:
+        c.post("/api/comment", {"author": "jonas", "text": "Made this, loved it."})
+        c.post("/api/comment", {"author": "lena", "text": "@jonas whole wheat?"})
+        time.sleep(0.6)
+        assert not [e for e in c.events() if e["actor_type"] == "agent"]  # neither woke it
+        tag = c.post("/api/comment", {"author": "maria", "text": "@plato can I skip the Dutch oven?"})
+        reply = wait_until(lambda: [e for e in c.events() if e["actor_type"] == "agent" and e["surface"] == "comment"])[0]
+        assert reply["parent_id"] == tag["id"]                           # answered in maria's thread
+        eyes = [e for e in c.events() if e["surface"] == "reaction" and e["actor_type"] == "agent"]
+        assert [(e["op"], e["parent_id"]) for e in eyes] == [("👀", tag["id"])]
+        follow = c.post("/api/comment", {"author": "aiko", "text": "@plato and if my kitchen is cold?",
+                                         "reply_to": tag["id"]})
+        wait_until(lambda: len([e for e in c.events() if e["actor_type"] == "agent" and e["surface"] == "comment"]) == 2)
+        replies = [e for e in c.events() if e["actor_type"] == "agent" and e["surface"] == "comment"]
+        assert replies[1]["parent_id"] == tag["id"]                      # same thread
+        assert any(e["op"] == "👀" and e["parent_id"] == follow["id"] for e in c.events())
+        assert set(c.get("/api/state")["woke"]) == {tag["id"], follow["id"]}
+    finally:
+        c.close()
+
+
+def test_ticket_board_wakes_on_assignment_and_on_comments_to_its_own_tickets(tmp_path):
+    agent, tickets, app = build_tickets(str(tmp_path / "ws"), OfflineModel(delay=0))
+    other = tickets.create("Q3 retro notes", "collect action items", "you")
+    tickets.edit(other, "collect action items, by Friday", "you")
+    tickets.comment(other, "anyone?", "you")
+    assert agent.wake() is None                                      # nothing assigned to it: no wake
+    mine = tickets.create("Launch checklist", "for the pricing page", "you", assignee="plato")
+    assert agent.wake().outcome == "stopped"
+    assert tickets.ticket(mine)["status"] == "review"                # picked up, worked, handed back
+    tickets.move(mine, "done", "you")
+    assert agent.wake() is None                                      # people moving tickets is logged only
+    tickets.comment(mine, "add a rollback step", "you")
+    assert agent.wake() is not None                                  # feedback on its ticket wakes it
+    tickets.assign(mine, None, "you")
+    tickets.comment(mine, "still there?", "you")
+    assert agent.wake() is None                                      # unassigned: no longer its business
+
+
+def test_ticket_deliverables_are_attached_and_done_is_left_to_people(tmp_path):
+    model = ScriptedModel([
+        "update_ticket('T-1', comment='Drafting it.', status='in_progress')\n"
+        "print(update_ticket('T-1', attach='tickets/T-1/missing.md'))",
+        "write_file('tickets/T-1/checklist.md', '- copy review\\n- rollback plan')\n"
+        "update_ticket('T-1', attach='tickets/T-1/checklist.md')\n"
+        "print(update_ticket('T-1', status='done'))",
+        "update_ticket('T-1', comment='Checklist attached.', status='review'); stop('handed back')",
+    ])
+    agent, tickets, _ = build_tickets(str(tmp_path / "ws"), model)
+    tickets.create("Launch checklist", "one page", "you", assignee="plato")
+    r = agent.wake()
+    assert r.outcome == "stopped"
+    t = tickets.ticket("T-1")
+    assert t["attachments"] == ["tickets/T-1/checklist.md"] and t["status"] == "review"
+    outputs = [m["content"] for m in model.calls[1] + model.calls[2] if m["role"] == "tool"]
+    assert any("no file 'tickets/T-1/missing.md'" in o for o in outputs)
+    assert any("people move them to done" in o for o in outputs)

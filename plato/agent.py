@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import re
+import threading
 import urllib.request
 import uuid
 from dataclasses import dataclass, field
@@ -38,10 +39,11 @@ from plato.context import (
     render_inbox,
 )
 from plato.events import Dispatched, Event, EventLog
-from plato.executor import Executor, StopRun
+from plato.executor import Executor, StopRun, uncaptured
 from plato.model import Model
 from plato.should_respond import Policy
 from plato.tools import ToolRegistry, default_registry
+from plato.usage import Limits, Usage
 from plato.workspace import InboxItem, Workspace
 
 
@@ -58,7 +60,7 @@ class Config:
 
 @dataclass
 class WakeResult:
-    outcome: str  # stopped | stop_guard_exhausted | budget_exhausted | stuck
+    outcome: str  # stopped | stop_guard_exhausted | budget_exhausted | stuck | error | over_limit
     steps: int
     actions: list[dict] = field(default_factory=list)  # what the agent did in each channel
     summary: str = ""
@@ -104,6 +106,8 @@ class Agent:
         chat: bool | Chat = True,
         log: EventLog | None = None,
         policy: Policy | None = None,
+        limits: Limits | None = None,
+        usage_file: str | Path | None = None,
         agent_id: str = "agent",
         human_id: str = "user",
         on_event: Callable[[str, dict], None] | None = None,
@@ -120,6 +124,12 @@ class Agent:
         # per-wake state, read by channels
         self._actions: list[dict] = []
         self._live: set[str] | None = None  # channels the current wake's input arrived through
+        self.busy = False  # True while a wake is running (for UIs: "thinking…")
+        self._consumed: set[str] = set()  # inbox items this wake took
+        self.error_streak = 0             # consecutive wakes that failed (model down, bad key…)
+        # Spend limits, checked before every model call; usage persists in the workspace.
+        self.usage = Usage(Path(usage_file) if usage_file else self.ws.root / "usage.json", limits)
+        self._limit_noticed: str | None = None  # the day we last told the person
         self._dispatch_log: list[Dispatched] = []
         self.registry = self._builtin_tools()
         self.registry.extend(default_registry)
@@ -170,7 +180,11 @@ class Agent:
 
     def pending_inbox(self) -> list[InboxItem]:
         """Run the dispatcher, then return what this agent hasn't handled yet."""
-        self._dispatch_log += self.log.dispatch_once()
+        new = self.log.dispatch_once()
+        self._dispatch_log += new
+        if self.on_event:  # observers see every gate decision right away, woken or not
+            for d in new:
+                self.on_event("gate", self._gate_record(d))
         return [self._inbox_item(ev) for ev in self.log.pending_inbox(self.agent_id)]
 
     def wake(self, force: bool = False) -> WakeResult | None:
@@ -179,10 +193,45 @@ class Agent:
         inbox = self.pending_inbox()
         if not inbox and not (force and self.ws.active_todos()):
             return None
+        over = self.usage.exceeded()
+        if over:  # leave the inbox untouched: it's handled once there's budget again
+            self._limit_reached(over, started=False)
+            return WakeResult("over_limit", 0, summary=over)
         return self._run(inbox)
+
+    def serve(self, stop: threading.Event | None = None, poll: float = 2.0) -> None:
+        """Run always-on: dormant until something new lands on the log, then
+        wake. Messages that arrive *during* a wake are delivered into it at the
+        next step, so a person can keep typing while the agent works. Run it in
+        a thread and set `stop` to end it."""
+        stop = stop or threading.Event()
+        while not stop.is_set():
+            seen = self.log.last_seq()  # before checking, so nothing slips between
+            result = self.wake()
+            if result is None:
+                self.log.wait_for_events(seen, timeout=poll)
+            elif result.outcome == "error":
+                # Back off instead of hammering a provider that is down: 5s, 10s, … 5 min.
+                stop.wait(min(5 * 2 ** (self.error_streak - 1), 300))
+            elif result.outcome == "over_limit":
+                stop.wait(60)  # nothing to do until the limit resets (or is raised)
 
     # ── the loop ─────────────────────────────────────────────────────────
     def _run(self, inbox) -> WakeResult:
+        self.busy = True
+        self._consumed = set()
+        try:
+            result = self._run_inner(inbox)
+            self.error_streak = 0
+            return result
+        except Exception as e:  # a failed wake must not kill an always-on agent
+            return self._failed(e)
+        finally:
+            self.busy = False
+            self._live = None
+            self._trace_file = None  # events between wakes don't belong to the last wake's trace
+
+    def _run_inner(self, inbox) -> WakeResult:
         cfg, ws = self.cfg, self.ws
         self._actions = []
         self._trace_file = ws.traces / f"{datetime.now():%Y%m%d-%H%M%S}-{uuid.uuid4().hex[:6]}.jsonl"
@@ -202,9 +251,9 @@ class Agent:
             messages.append({"role": "user", "content": render(
                 "correction_circuit_breaker", WAKES=self._no_progress_wakes)})
         self.log.mark_done(self.agent_id, {i.id for i in inbox})
-        for d in self._dispatch_log:
-            self._emit("gate", event=d.event.event_id, surface=d.event.surface, artifact=d.event.artifact_id,
-                       participant=d.participant, respond=d.decision.respond, reason=d.decision.reason)
+        self._consumed |= {i.id for i in inbox}
+        for d in self._dispatch_log:  # into this wake's trace (observers already saw them)
+            self._trace("gate", self._gate_record(d))
         self._dispatch_log = []
         self._emit("wake", context=context, budget=budget, inbox=len(inbox))
 
@@ -222,6 +271,7 @@ class Agent:
                 arrived = self.pending_inbox()
                 if arrived:
                     self.log.mark_done(self.agent_id, {i.id for i in arrived})
+                    self._consumed |= {i.id for i in arrived}
                     if self._live is not None:  # newly addressed channels go live
                         self._live = self._live | self._live_channels(arrived)
                     items = render_inbox(arrived, self.channels)
@@ -234,9 +284,17 @@ class Agent:
                 self._emit("guard", name="budget_wrap_up", steps_left=budget - used + 1)
 
             messages = trim_history(messages, cfg.history_max_messages)
+            over = self.usage.exceeded()
+            if over:  # checked before every model call, so a long run can't blow through it
+                self._limit_reached(over, started=True)
+                ws.log(f"(stopped mid-run: {over})")
+                self._emit("end", outcome="over_limit")
+                return self._result("over_limit", step, over)
             turn = self.model.complete(messages, self.tool_schema)
+            self.usage.record(turn.usage)
             if turn.code is None:
-                messages.append({"role": "assistant", "content": turn.text or ""})
+                messages.append({"role": "assistant", "content": turn.text or "",
+                                 **({"_native": turn.native} if turn.native else {})})
                 messages.append({"role": "user", "content": render("nudge_no_tool_call")})
                 self._emit("no_tool_call", text=turn.text)
                 continue
@@ -246,10 +304,13 @@ class Agent:
             out = result.output or "(no output)"
             for a in self._actions[actions_before:]:
                 out += f"\n[delivered via {a['channel']}]"
-            messages.append({"role": "assistant", "content": turn.text or None, "tool_calls": [{
+            assistant = {"role": "assistant", "content": turn.text or None, "tool_calls": [{
                 "id": turn.call_id, "type": "function",
                 "function": {"name": "run", "arguments": json.dumps({"thoughts": turn.thoughts, "code": turn.code})},
-            }]})
+            }]}
+            if turn.native:
+                assistant["_native"] = turn.native  # private: adapters strip "_" keys they don't own
+            messages.append(assistant)
             messages.append({"role": "tool", "tool_call_id": turn.call_id, "content": out})
             self._emit("step", step=step, thoughts=turn.thoughts, code=turn.code,
                        status=result.status, output=result.output, usage=turn.usage)
@@ -312,6 +373,32 @@ class Agent:
         self._emit("end", outcome="budget_exhausted", no_progress_wakes=self._no_progress_wakes)
         return self._result("budget_exhausted", step)
 
+    def _limit_reached(self, reason: str, started: bool) -> None:
+        self._emit("over_limit", reason=reason, mid_run=started)
+        today = datetime.now().date().isoformat()
+        if self._limit_noticed != today:  # once a day, not on every message
+            self._limit_noticed = today
+            self._notify(f"I've paused: {reason}. "
+                         + ("I stopped partway; " if started else "")
+                         + "new messages will wait until the limit resets or is raised.")
+
+    def _failed(self, error: Exception) -> WakeResult:
+        """A wake crashed (usually the model call: bad key, provider down).
+        If the agent hadn't acted yet, its input goes back to the inbox to be
+        retried; if it had, retrying would repeat what it already did, so the
+        input stays handled. Either way the person hears about it once."""
+        self.error_streak += 1
+        detail = f"{type(error).__name__}: {error}"[:300]
+        retry = not self._actions and bool(self._consumed)
+        if retry:
+            self.log.mark_undone(self.agent_id, self._consumed)
+        self._emit("error", error=detail, retrying=retry, streak=self.error_streak)
+        self.ws.log(f"(wake failed: {detail})")
+        if self.error_streak == 1:
+            self._notify("I ran into a problem and couldn't finish: "
+                         f"{detail}. " + ("I'll retry shortly." if retry else "Please check and ask me again."))
+        return self._result("error", 0, detail)
+
     # ── helpers ──────────────────────────────────────────────────────────
     def _result(self, outcome: str, steps: int, summary: str = "") -> WakeResult:
         self._live = None
@@ -355,16 +442,26 @@ class Agent:
         if not any(ch.notify(text) for ch in self.channels.values()):
             self._emit("notify_undelivered", text=text)
 
-    def _emit(self, kind: str, **data) -> None:
-        if kind == "channel_reply":
-            self._actions.append({"channel": data["channel"], "artifact": data.get("artifact"),
-                                  "text": data.get("text", "")})
+    @staticmethod
+    def _gate_record(d: Dispatched) -> dict:
+        return {"event": d.event.event_id, "surface": d.event.surface, "op": d.event.op,
+                "artifact": d.event.artifact_id, "actor": d.event.actor_id, "participant": d.participant,
+                "respond": d.decision.respond, "reason": d.decision.reason}
+
+    def _trace(self, kind: str, data: dict) -> None:
         if self._trace_file is not None:
             rec = {"ts": datetime.now().isoformat(timespec="seconds"), "kind": kind, **data}
             with self._trace_file.open("a", encoding="utf-8") as f:
                 f.write(json.dumps(rec, default=str) + "\n")
+
+    def _emit(self, kind: str, **data) -> None:
+        if kind == "channel_reply":
+            self._actions.append({"channel": data["channel"], "artifact": data.get("artifact"),
+                                  "text": data.get("text", "")})
+        self._trace(kind, data)
         if self.on_event:
-            self.on_event(kind, data)
+            with uncaptured():  # an observer's prints belong on screen, not in the agent's output
+                self.on_event(kind, data)
 
     def _builtin_tools(self) -> ToolRegistry:
         reg, ws = ToolRegistry(), self.ws
