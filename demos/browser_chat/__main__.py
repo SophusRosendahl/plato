@@ -16,7 +16,7 @@ import threading
 from collections import deque
 from pathlib import Path
 
-from demos._shared.models import describe, make_limits, make_model
+from demos._shared.models import describe, make_model, spend_limits
 from demos._shared.web import App, event_json
 from plato import Agent, Chat
 
@@ -28,8 +28,9 @@ user's messages with react(message_id, emoji) when an emoji says it best."""
 
 
 def build(workspace: str, model=None) -> tuple[Agent, App]:
+    model = model or make_model()
     gates: deque[dict] = deque(maxlen=40)
-    agent = Agent(workspace, model or make_model(), limits=make_limits(), identity=IDENTITY,
+    agent = Agent(workspace, model, **spend_limits(model), identity=IDENTITY,
                   chat=Chat(wake_on=("❓", "👎")),
                   on_event=lambda kind, data: gates.append(data) if kind == "gate" else None)
     app = App(Path(__file__).parent)

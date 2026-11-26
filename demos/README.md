@@ -22,9 +22,13 @@ export PLATO_MODEL=anthropic:claude-opus-5-5   # + ANTHROPIC_API_KEY
 # or openai:gpt-5, gemini:..., openrouter:..., ollama:llama3.3 (local) — see plato/connect.py
 ```
 
-Every demo caps model use at **300,000 tokens a day** (input + output). Set
-`PLATO_DAILY_TOKENS` to change it, or `0` to remove it. Over the cap the agent
-stops cleanly, says so once, and new messages wait until the next day.
+With a real model, every demo spends from **one shared budget**: 100 a month and
+5 a day, tracked in `~/.plato/usage.json` across all demos and runs. Change them
+with `PLATO_MONTHLY_BUDGET` / `PLATO_DAILY_BUDGET` (0 = no cap) and
+`PLATO_USAGE_FILE`. Cost is computed from `PLATO_PRICE_PER_MTOK="input,output"`
+(per million tokens). The default, 2.5 and 15, is deliberately pessimistic, so the
+meter over-counts on cheaper models and stops before real spend reaches the cap.
+Over a cap the agent stops cleanly, says so once, and new messages wait.
 
 ## How they're built
 

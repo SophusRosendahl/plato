@@ -24,7 +24,7 @@ import threading
 from collections import deque
 from pathlib import Path
 
-from demos._shared.models import describe, make_limits, make_model
+from demos._shared.models import describe, make_model, spend_limits
 from demos._shared.web import App, event_json
 from plato import WITHHELD, Agent, Channel, Event, InReplyTo, PayloadField, RecentEvents, Rule, ToolRegistry
 
@@ -94,6 +94,7 @@ class PageComments(Channel):
 
 
 def build(workspace: str, model=None) -> tuple[Agent, PageComments, App]:
+    model = model or make_model()
     comments = PageComments("sourdough-for-impatient-people", "article.md")
     woke: deque[str] = deque(maxlen=500)
 
@@ -101,7 +102,7 @@ def build(workspace: str, model=None) -> tuple[Agent, PageComments, App]:
         if kind == "gate" and data["respond"]:
             woke.append(data["event"])
 
-    agent = Agent(workspace, model or make_model(), limits=make_limits(), agent_id="plato", chat=False,
+    agent = Agent(workspace, model, **spend_limits(model), agent_id="plato", chat=False,
                   channels=[comments], on_event=on_event)
     shutil.copy(HERE / "article.md", agent.ws.files / "article.md")
     app = App(HERE)

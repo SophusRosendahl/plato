@@ -13,6 +13,7 @@ from __future__ import annotations
 import os
 import re
 import time
+from pathlib import Path
 
 from plato import Limits, ModelTurn, connect
 
@@ -29,11 +30,27 @@ def make_model(offline_delay: float | None = None):
     return connect(name)
 
 
-def make_limits() -> Limits:
-    """A daily token cap for the demos (default 300k; PLATO_DAILY_TOKENS to change,
-    0 for none). The offline model reports no usage, so it never hits it."""
-    cap = int(os.environ.get("PLATO_DAILY_TOKENS", "300000"))
-    return Limits(daily_tokens=cap or None)
+# Pessimistic default prices (per million tokens, input/output): roughly the top
+# tier of the priciest Gemini models, so the meter over-counts on cheaper models
+# and a cap trips before real spend reaches it. Set PLATO_PRICE_PER_MTOK="in,out"
+# to the real prices of the model you use for a closer count.
+DEFAULT_PRICE_PER_MTOK = (2.50, 15.0)
+
+
+def spend_limits(model) -> dict:
+    """Agent kwargs that cap spend for a real model: PLATO_MONTHLY_BUDGET (default
+    100) and PLATO_DAILY_BUDGET (default 5), in the currency of your prices, on one
+    usage file shared by every demo and run (PLATO_USAGE_FILE, default
+    ~/.plato/usage.json). The offline model costs nothing and gets no limits."""
+    if isinstance(model, OfflineModel):
+        return {}
+    raw = os.environ.get("PLATO_PRICE_PER_MTOK")
+    price = tuple(float(x) for x in raw.split(",")) if raw else DEFAULT_PRICE_PER_MTOK
+    limits = Limits(monthly_cost=float(os.environ.get("PLATO_MONTHLY_BUDGET", "100")) or None,
+                    daily_cost=float(os.environ.get("PLATO_DAILY_BUDGET", "5")) or None,
+                    price_per_mtok=price)
+    usage_file = os.environ.get("PLATO_USAGE_FILE") or Path.home() / ".plato" / "usage.json"
+    return {"limits": limits, "usage_file": usage_file}
 
 
 def describe(model) -> str:

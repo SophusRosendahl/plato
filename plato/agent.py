@@ -107,6 +107,7 @@ class Agent:
         log: EventLog | None = None,
         policy: Policy | None = None,
         limits: Limits | None = None,
+        usage_file: str | Path | None = None,
         agent_id: str = "agent",
         human_id: str = "user",
         on_event: Callable[[str, dict], None] | None = None,
@@ -127,7 +128,7 @@ class Agent:
         self._consumed: set[str] = set()  # inbox items this wake took
         self.error_streak = 0             # consecutive wakes that failed (model down, bad key…)
         # Spend limits, checked before every model call; usage persists in the workspace.
-        self.usage = Usage(self.ws.root / "usage.json", limits)
+        self.usage = Usage(Path(usage_file) if usage_file else self.ws.root / "usage.json", limits)
         self._limit_noticed: str | None = None  # the day we last told the person
         self._dispatch_log: list[Dispatched] = []
         self.registry = self._builtin_tools()
@@ -379,7 +380,7 @@ class Agent:
             self._limit_noticed = today
             self._notify(f"I've paused: {reason}. "
                          + ("I stopped partway; " if started else "")
-                         + "new messages will wait until the limit resets tomorrow or is raised.")
+                         + "new messages will wait until the limit resets or is raised.")
 
     def _failed(self, error: Exception) -> WakeResult:
         """A wake crashed (usually the model call: bad key, provider down).

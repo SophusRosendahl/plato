@@ -1,6 +1,11 @@
 """Spend limits: counted from every model turn, enforced before every model call."""
 
+import json
+from datetime import date
+
 import pytest
+
+from demos._shared.models import OfflineModel, spend_limits
 
 from plato import Agent, Limits, ModelTurn, ScriptedModel
 from plato.usage import token_counts
@@ -61,3 +66,40 @@ def test_no_limits_means_no_checks(tmp_path):
     agent.send("go")
     assert agent.wake().outcome == "stopped"
     assert agent.usage.today()["calls"] == 1                            # still recorded, for visibility
+
+
+def test_monthly_cost_limit_counts_the_whole_month(tmp_path):
+    usage_file = tmp_path / "usage.json"
+    usage_file.write_text(json.dumps({                          # earlier this month: 1M in + 1M out
+        date.today().replace(day=1).isoformat(): {"input": 1_000_000, "output": 1_000_000, "calls": 50}}))
+    limits = Limits(monthly_cost=100.0, price_per_mtok=(2.5, 15.0))   # 2.5 + 15 = 17.5 so far
+    agent = Agent(tmp_path / "ws", ScriptedModel([turn('reply("a"); stop("x")')]), limits=limits,
+                  usage_file=usage_file)
+    agent.send("go")
+    assert agent.wake().outcome == "stopped"                    # 17.5 of 100: room left
+    usage_file.write_text(json.dumps({date.today().replace(day=1).isoformat():
+                                      {"input": 6_000_000, "output": 6_000_000, "calls": 300}}))  # 105
+    agent.send("again")
+    r = agent.wake()
+    assert r.outcome == "over_limit" and "this month's spend limit (100.00)" in r.summary
+
+
+def test_agents_sharing_a_usage_file_share_one_budget(tmp_path):
+    shared = tmp_path / "usage.json"
+    limits = Limits(daily_tokens=100)
+    a = Agent(tmp_path / "a", ScriptedModel([turn('reply("hi"); stop("x")', 90, 20)]), limits=limits, usage_file=shared)
+    b = Agent(tmp_path / "b", ScriptedModel([turn('reply("hi"); stop("x")')]), limits=limits, usage_file=shared)
+    a.send("hello")
+    a.wake()
+    b.send("hello")
+    assert b.wake().outcome == "over_limit"                     # a used the shared budget up
+
+
+def test_demos_cap_real_models_on_a_shared_monthly_budget(tmp_path, monkeypatch):
+    monkeypatch.setenv("PLATO_USAGE_FILE", str(tmp_path / "u.json"))
+    monkeypatch.delenv("PLATO_MONTHLY_BUDGET", raising=False)
+    monkeypatch.delenv("PLATO_PRICE_PER_MTOK", raising=False)
+    kw = spend_limits(ScriptedModel([]))
+    assert kw["limits"].monthly_cost == 100 and kw["limits"].daily_cost == 5
+    assert kw["limits"].price_per_mtok == (2.5, 15.0) and str(kw["usage_file"]).endswith("u.json")
+    assert spend_limits(OfflineModel()) == {}                   # the stand-in costs nothing
