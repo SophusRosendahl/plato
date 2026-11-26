@@ -16,6 +16,7 @@ guarantees, and nothing else.
 | Budget notice | Being cut off mid-thought by a step limit the model can't see |
 | Circuit breaker | Repeated no-progress wakes burning budget forever: parks the items, tells the user once, caps later wakes |
 | Failed-wake recovery | A model error losing the input: unacted input goes back to the inbox, the person is told once, `serve()` backs off |
+| Spend limit | Runaway cost: `Limits(daily_tokens=..., daily_cost=..., price_per_mtok=(in, out))` is checked before every model call; over the limit, runs stop cleanly and new input waits, with one notice a day |
 
 State is a folder of plain files (`memory.md`, `todo.md`, `daily_log.md`,
 `files/`, `traces/`) plus one SQLite event log, so you can watch the agent think.
