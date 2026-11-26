@@ -1,4 +1,4 @@
-"""Always-on serving, replies, reactions and addressed rules: what the demos stand on."""
+"""Always-on serving, replies, reactions, addressed rules, output capture, failure recovery."""
 
 import threading
 import time

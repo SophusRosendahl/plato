@@ -4,7 +4,7 @@ Code-first: the model's only action is "run this Python". Tools are plain
 functions in the namespace; variables persist across steps within a wake.
 `stop()` is an interrupt (an exception); `reply()` is not — it just records.
 
-SPIKE NOTE: this runs `exec()` in-process. That is fine for a demo you run on
+NOTE: this runs `exec()` in-process. That is fine for a demo you run on
 your own machine and NOT a sandbox. A subprocess/Docker/E2B executor with the
 same `run(code) -> ExecResult` shape is the obvious next step.
 """

@@ -1,4 +1,4 @@
-"""plato — an event-driven, code-first agent harness (spike)."""
+"""plato: an event-driven, code-first agent harness."""
 
 from plato.agent import Agent, Config, WakeResult
 from plato.anthropic_model import AnthropicModel
