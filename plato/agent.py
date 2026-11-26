@@ -59,7 +59,7 @@ class Config:
 
 @dataclass
 class WakeResult:
-    outcome: str  # stopped | stop_guard_exhausted | budget_exhausted | stuck
+    outcome: str  # stopped | stop_guard_exhausted | budget_exhausted | stuck | error
     steps: int
     actions: list[dict] = field(default_factory=list)  # what the agent did in each channel
     summary: str = ""
@@ -122,6 +122,8 @@ class Agent:
         self._actions: list[dict] = []
         self._live: set[str] | None = None  # channels the current wake's input arrived through
         self.busy = False  # True while a wake is running (for UIs: "thinking…")
+        self._consumed: set[str] = set()  # inbox items this wake took
+        self.error_streak = 0             # consecutive wakes that failed (model down, bad key…)
         self._dispatch_log: list[Dispatched] = []
         self.registry = self._builtin_tools()
         self.registry.extend(default_registry)
@@ -195,14 +197,23 @@ class Agent:
         stop = stop or threading.Event()
         while not stop.is_set():
             seen = self.log.last_seq()  # before checking, so nothing slips between
-            if self.wake() is None:
+            result = self.wake()
+            if result is None:
                 self.log.wait_for_events(seen, timeout=poll)
+            elif result.outcome == "error":
+                # Back off instead of hammering a provider that is down: 5s, 10s, … 5 min.
+                stop.wait(min(5 * 2 ** (self.error_streak - 1), 300))
 
     # ── the loop ─────────────────────────────────────────────────────────
     def _run(self, inbox) -> WakeResult:
         self.busy = True
+        self._consumed = set()
         try:
-            return self._run_inner(inbox)
+            result = self._run_inner(inbox)
+            self.error_streak = 0
+            return result
+        except Exception as e:  # a failed wake must not kill an always-on agent
+            return self._failed(e)
         finally:
             self.busy = False
             self._live = None
@@ -228,6 +239,7 @@ class Agent:
             messages.append({"role": "user", "content": render(
                 "correction_circuit_breaker", WAKES=self._no_progress_wakes)})
         self.log.mark_done(self.agent_id, {i.id for i in inbox})
+        self._consumed |= {i.id for i in inbox}
         for d in self._dispatch_log:  # into this wake's trace (observers already saw them)
             self._trace("gate", self._gate_record(d))
         self._dispatch_log = []
@@ -247,6 +259,7 @@ class Agent:
                 arrived = self.pending_inbox()
                 if arrived:
                     self.log.mark_done(self.agent_id, {i.id for i in arrived})
+                    self._consumed |= {i.id for i in arrived}
                     if self._live is not None:  # newly addressed channels go live
                         self._live = self._live | self._live_channels(arrived)
                     items = render_inbox(arrived, self.channels)
@@ -340,6 +353,23 @@ class Agent:
         ws.log("(ran out of steps with no progress)")
         self._emit("end", outcome="budget_exhausted", no_progress_wakes=self._no_progress_wakes)
         return self._result("budget_exhausted", step)
+
+    def _failed(self, error: Exception) -> WakeResult:
+        """A wake crashed (usually the model call: bad key, provider down).
+        If the agent hadn't acted yet, its input goes back to the inbox to be
+        retried; if it had, retrying would repeat what it already did, so the
+        input stays handled. Either way the person hears about it once."""
+        self.error_streak += 1
+        detail = f"{type(error).__name__}: {error}"[:300]
+        retry = not self._actions and bool(self._consumed)
+        if retry:
+            self.log.mark_undone(self.agent_id, self._consumed)
+        self._emit("error", error=detail, retrying=retry, streak=self.error_streak)
+        self.ws.log(f"(wake failed: {detail})")
+        if self.error_streak == 1:
+            self._notify("I ran into a problem and couldn't finish: "
+                         f"{detail}. " + ("I'll retry shortly." if retry else "Please check and ask me again."))
+        return self._result("error", 0, detail)
 
     # ── helpers ──────────────────────────────────────────────────────────
     def _result(self, outcome: str, steps: int, summary: str = "") -> WakeResult:

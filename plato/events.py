@@ -287,6 +287,13 @@ class EventLog:
             " WHERE i.participant_id=? AND i.done=0 ORDER BY e.seq", (participant_id,))
         return [self._event(r) for r in rows]
 
+    def mark_undone(self, participant_id: str, event_ids: set[str]) -> None:
+        """Put items back in the inbox (e.g. a wake failed before acting on them)."""
+        with self._lock:
+            self._db.executemany(
+                "UPDATE inbox_items SET done=0 WHERE participant_id=? AND event_id=?",
+                [(participant_id, eid) for eid in event_ids])
+
     def mark_done(self, participant_id: str, event_ids: set[str]) -> None:
         """Flip exactly the items the participant was shown; anything that
         arrived after rendering stays pending."""

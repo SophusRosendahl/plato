@@ -15,12 +15,6 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Callable, Protocol
 
-try:
-    import openai
-except ImportError:  # optional: only needed for live models
-    openai = None
-
-
 @dataclass
 class ModelTurn:
     code: str | None
@@ -59,8 +53,10 @@ class OpenAICompatModel:
         max_tokens: int = 4096,
         temperature: float | None = None,
     ) -> None:
-        if openai is None:
-            raise RuntimeError("pip install openai to use OpenAICompatModel")
+        try:  # optional dependency, loaded only when an OpenAI-compatible model is used
+            import openai  # noqa: PLC0415
+        except ImportError as e:
+            raise RuntimeError("pip install openai to use OpenAICompatModel") from e
         self.model = model
         self.max_tokens = max_tokens
         self.temperature = temperature

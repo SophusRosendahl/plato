@@ -31,11 +31,6 @@ import json
 
 from plato.model import ModelTurn
 
-try:
-    import anthropic
-except ImportError:  # optional: only needed for Claude
-    anthropic = None
-
 DEFAULT_MODEL = "claude-opus-5-5"
 BETA_BLOCK_BINDING = "thinking-binding-controls-2026-08-01"
 BETA_FALLBACK = "server-side-fallback-2026-07-01"
@@ -54,8 +49,10 @@ class AnthropicModel:
         fallbacks: str | list | None = "default",
     ) -> None:
         if client is None:
-            if anthropic is None:
-                raise RuntimeError("pip install anthropic to use AnthropicModel")
+            try:  # optional dependency, loaded only when Claude is used
+                import anthropic  # noqa: PLC0415
+            except ImportError as e:
+                raise RuntimeError("pip install anthropic to use AnthropicModel") from e
             client = anthropic.Anthropic(api_key=api_key) if api_key else anthropic.Anthropic()
         self.client = client
         self.model = model

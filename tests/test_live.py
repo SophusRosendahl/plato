@@ -160,3 +160,64 @@ def test_other_threads_printing_during_agent_code_are_not_captured(capsys):
     result = Executor({"started": started, "done": done}).run("started.set()\n_ = done.wait(5)\nprint('mine')")
     assert result.output.strip() == "mine"                           # only the agent's own print
     assert "from the web server" in capsys.readouterr().out          # the other thread hit the screen
+
+
+class FlakyModel:
+    """Fails `failures` times, then delegates to a scripted model."""
+
+    def __init__(self, failures, then):
+        self.failures, self.then, self.calls = failures, then, 0
+
+    def complete(self, messages, tool):
+        self.calls += 1
+        if self.failures:
+            self.failures -= 1
+            raise ConnectionError("provider unavailable")
+        return self.then.complete(messages, tool)
+
+
+def test_a_failed_wake_keeps_the_message_and_says_so_once(tmp_path):
+    model = FlakyModel(2, ScriptedModel(['reply("Here you go."); stop("x")']))
+    agent = Agent(tmp_path / "ws", model)
+    agent.send("summarise my week")
+    first = agent.wake()
+    assert first.outcome == "error" and "provider unavailable" in first.summary
+    assert [i.text for i in agent.pending_inbox()] == ["summarise my week"]   # not lost
+    assert agent.wake().outcome == "error"                                   # still down
+    notices = [e.text for e in agent.log.recent(agent.thread) if e.actor_type == "agent"]
+    assert len(notices) == 1 and "retry" in notices[0]                       # told once, not per retry
+    assert agent.wake().replies == ["Here you go."]                          # recovered, same message
+    assert agent.error_streak == 0
+
+
+def test_a_wake_that_failed_after_acting_is_not_replayed(tmp_path):
+    def boom(_):
+        raise RuntimeError("model crashed mid-task")
+
+    agent = Agent(tmp_path / "ws", ScriptedModel(['reply("Starting on it.")', boom]))
+    agent.send("draft the newsletter")
+    assert agent.wake().outcome == "error"
+    assert agent.pending_inbox() == []                    # it had already replied: retrying would repeat that
+    assert "Please check and ask me again" in agent.log.recent(agent.thread)[-1].text
+
+
+def test_serve_survives_a_provider_outage(tmp_path, monkeypatch):
+    heard = []
+    model = FlakyModel(1, ScriptedModel([], default='reply("back online"); stop("x")'))
+    agent = Agent(tmp_path / "ws", model, chat=Chat(on_message=heard.append))
+    waits = []
+    real_wait = threading.Event.wait
+
+    def short_wait(self, timeout=None):                   # don't really back off for 5s in a test
+        waits.append(timeout)
+        return real_wait(self, min(timeout or 0, 0.05))
+
+    monkeypatch.setattr(threading.Event, "wait", short_wait)
+    stop = threading.Event()
+    t = threading.Thread(target=agent.serve, kwargs={"stop": stop, "poll": 0.1}, daemon=True)
+    t.start()
+    agent.send("are you there?")
+    assert wait_until(lambda: "back online" in heard)
+    stop.set()
+    t.join(timeout=3)
+    assert 5 in waits and heard[0].startswith("I ran into a problem")
