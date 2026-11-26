@@ -3,8 +3,8 @@
     plato chat  --workspace ./ws          talk to the agent
     plato watch --workspace ./ws DIR      wake the agent when files land in DIR
 
-Model config via env: PLATO_MODEL, PLATO_BASE_URL, PLATO_API_KEY
-(falls back to OPENAI_API_KEY).
+Model: PLATO_MODEL="provider:model", e.g. anthropic:claude-opus-5-5,
+openai:gpt-5, ollama:llama3.3 (see plato.connect for every provider).
 """
 
 from __future__ import annotations
@@ -17,7 +17,7 @@ from pathlib import Path
 
 from plato.agent import Agent, Config
 from plato.chat import Chat
-from plato.model import OpenAICompatModel
+from plato.connect import connect, providers
 
 DIM, BOLD, CYAN, YELLOW, RESET = "\033[2m", "\033[1m", "\033[36m", "\033[33m", "\033[0m"
 
@@ -42,14 +42,14 @@ def _printer(verbose: bool):
 
 
 def _build_agent(args) -> Agent:
-    model_name = os.environ.get("PLATO_MODEL")
-    if not model_name:
-        sys.exit("set PLATO_MODEL (and PLATO_BASE_URL / PLATO_API_KEY for non-OpenAI providers)")
-    model = OpenAICompatModel(
-        model_name,
-        base_url=os.environ.get("PLATO_BASE_URL"),
-        api_key=os.environ.get("PLATO_API_KEY") or os.environ.get("OPENAI_API_KEY"),
-    )
+    spec = os.environ.get("PLATO_MODEL")
+    if not spec:
+        sys.exit("set PLATO_MODEL, e.g. anthropic:claude-opus-5-5, openai:gpt-5 or ollama:llama3.3 "
+                 f"(providers: {', '.join(providers())})")
+    try:
+        model = connect(spec)
+    except ValueError as e:
+        sys.exit(str(e))
     return Agent(
         args.workspace, model,
         config=Config(max_steps=args.max_steps),

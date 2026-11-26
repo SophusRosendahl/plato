@@ -261,7 +261,8 @@ class Agent:
             messages = trim_history(messages, cfg.history_max_messages)
             turn = self.model.complete(messages, self.tool_schema)
             if turn.code is None:
-                messages.append({"role": "assistant", "content": turn.text or ""})
+                messages.append({"role": "assistant", "content": turn.text or "",
+                                 **({"_native": turn.native} if turn.native else {})})
                 messages.append({"role": "user", "content": render("nudge_no_tool_call")})
                 self._emit("no_tool_call", text=turn.text)
                 continue
@@ -271,10 +272,13 @@ class Agent:
             out = result.output or "(no output)"
             for a in self._actions[actions_before:]:
                 out += f"\n[delivered via {a['channel']}]"
-            messages.append({"role": "assistant", "content": turn.text or None, "tool_calls": [{
+            assistant = {"role": "assistant", "content": turn.text or None, "tool_calls": [{
                 "id": turn.call_id, "type": "function",
                 "function": {"name": "run", "arguments": json.dumps({"thoughts": turn.thoughts, "code": turn.code})},
-            }]})
+            }]}
+            if turn.native:
+                assistant["_native"] = turn.native  # private: adapters strip "_" keys they don't own
+            messages.append(assistant)
             messages.append({"role": "tool", "tool_call_id": turn.call_id, "content": out})
             self._emit("step", step=step, thoughts=turn.thoughts, code=turn.code,
                        status=result.status, output=result.output, usage=turn.usage)

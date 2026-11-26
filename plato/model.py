@@ -28,6 +28,9 @@ class ModelTurn:
     text: str = ""
     call_id: str = field(default_factory=lambda: "call_" + uuid.uuid4().hex[:10])
     usage: dict = field(default_factory=dict)
+    # The provider's own form of this turn ({"provider": ..., "content": ...}),
+    # kept so an adapter can replay it unchanged (e.g. Claude's thinking blocks).
+    native: dict | None = None
 
 
 class Model(Protocol):
@@ -66,7 +69,7 @@ class OpenAICompatModel:
     def complete(self, messages: list[dict], tool: dict) -> ModelTurn:
         kwargs = dict(
             model=self.model,
-            messages=messages,
+            messages=[{k: v for k, v in m.items() if not k.startswith("_")} for m in messages],
             tools=[tool],
             tool_choice={"type": "function", "function": {"name": tool["function"]["name"]}},
             max_tokens=self.max_tokens,

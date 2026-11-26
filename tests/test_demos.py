@@ -55,17 +55,21 @@ class Client:
 
 
 def test_hello_cli_answers_and_takes_follow_ups_mid_thought(tmp_path):
-    env = {**os.environ, "PLATO_OFFLINE_DELAY": "1"}
+    env = {**os.environ, "PLATO_OFFLINE_DELAY": "1.5"}
     env.pop("PLATO_MODEL", None)
     proc = subprocess.Popen([sys.executable, "-m", "demos.hello_cli", "--workspace", str(tmp_path / "ws")],
                             cwd=ROOT, env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+    seen: list[str] = []
+    threading.Thread(target=lambda: seen.extend(iter(proc.stdout.readline, "")), daemon=True).start()
     proc.stdin.write("hello there\n")
     proc.stdin.flush()
-    time.sleep(0.5)
+    wait_until(lambda: any("Thinking about" in line for line in seen))   # it's mid-thought now
     proc.stdin.write("and a follow-up\n")
     proc.stdin.flush()
-    time.sleep(5)
-    out = proc.communicate(timeout=10)[0]  # closes stdin itself (closing it first breaks on 3.12)
+    wait_until(lambda: any("dormant" in line for line in seen), timeout=20)
+    proc.stdin.close()
+    proc.wait(timeout=10)
+    out = "".join(seen)
     assert "I read: “hello there”" in out
     assert "Also got: “and a follow-up”" in out                      # joined the same wake
     assert out.count("awake") == 1

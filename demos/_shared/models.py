@@ -1,11 +1,11 @@
 """Model selection for the demos: your real model if configured, else an
 offline stand-in so every demo runs (and can be tested) without an API key.
 
-    export PLATO_MODEL=accounts/fireworks/models/kimi-k2p6
-    export PLATO_BASE_URL=https://api.fireworks.ai/inference/v1
-    export PLATO_API_KEY=...
+    export PLATO_MODEL=anthropic:claude-opus-5-5     # + ANTHROPIC_API_KEY
+    export PLATO_MODEL=openai:gpt-5                  # + OPENAI_API_KEY
+    export PLATO_MODEL=ollama:llama3.3               # local, no key
 
-Any OpenAI-compatible endpoint works.
+Any provider `plato.connect` knows, or any OpenAI-compatible base URL.
 """
 
 from __future__ import annotations
@@ -14,7 +14,7 @@ import os
 import re
 import time
 
-from plato import ModelTurn, OpenAICompatModel
+from plato import ModelTurn, connect
 
 _HINT = re.compile(r"^→ Reply in: (.+)$")
 _ITEM = re.compile(r"^\[\d\d:\d\d\] ([^:]+): (.*)$")
@@ -26,11 +26,7 @@ def make_model(offline_delay: float | None = None):
     if not name:
         delay = offline_delay if offline_delay is not None else float(os.environ.get("PLATO_OFFLINE_DELAY", "2"))
         return OfflineModel(delay=delay)
-    return OpenAICompatModel(
-        name,
-        base_url=os.environ.get("PLATO_BASE_URL"),
-        api_key=os.environ.get("PLATO_API_KEY") or os.environ.get("OPENAI_API_KEY"),
-    )
+    return connect(name)
 
 
 def describe(model) -> str:

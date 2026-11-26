@@ -6,8 +6,8 @@ requires-python = ">=3.10"
 dependencies = []
 
 [project.optional-dependencies]
-live = ["openai>=1.40"]
-dev = ["pytest"]
+live = ["openai>=1.40", "anthropic>=2.14"]
+dev = ["pytest", "openai>=1.40", "anthropic>=2.14"]
 
 [project.scripts]
 plato = "plato.__main__:main"

@@ -78,14 +78,37 @@ Agent(ws, model, channels=[Tickets()], chat=False) # an agent that only works ti
 pip install -e '.[live,dev]'
 pytest                                  # guards exercised with a scripted model, no key needed
 
-export PLATO_MODEL=accounts/fireworks/models/kimi-k2p6
-export PLATO_BASE_URL=https://api.fireworks.ai/inference/v1
-export PLATO_API_KEY=...
-plato -v chat                        # talk to it
-plato -v watch ./inbox-folder        # wake it when files land in a folder
+export PLATO_MODEL=anthropic:claude-opus-5-5   # and ANTHROPIC_API_KEY
+plato -v chat                           # talk to it
+plato -v watch ./inbox-folder           # wake it when files land in a folder
 ```
 
-Any OpenAI-compatible endpoint works.
+## Connect a model
+
+One string, `provider:model`, through two standard interfaces:
+
+| Interface | Providers |
+|---|---|
+| **Anthropic Messages** (official SDK) | `anthropic:` (Claude). On Bedrock / Vertex AI / Foundry, pass that platform's client: `AnthropicModel(client=...)` |
+| **OpenAI Chat Completions** | `openai:` `gemini:` `mistral:` `deepseek:` `xai:` `groq:` `together:` `fireworks:` `openrouter:` · a `litellm:` proxy (100+ providers) · local `ollama:` `lmstudio:` `vllm:` · or any base URL: `http://host:port/v1:model` |
+
+```python
+from plato import Agent, connect
+
+Agent("./ws", connect("anthropic:claude-opus-5-5"))
+Agent("./ws", connect("openrouter:meta-llama/llama-4-maverick"))
+Agent("./ws", connect("ollama:llama3.3"))      # local, no key
+```
+
+Each preset reads its usual key (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`,
+`GEMINI_API_KEY`, …); `PLATO_API_KEY` / `PLATO_BASE_URL` override. A model is just
+an object with `complete(messages, tool) -> ModelTurn`, so anything else is a
+small adapter away.
+
+The Claude adapter replays Claude's thinking blocks unchanged and uses
+`tool_choice: auto` with a strict schema, because current Claude models reject
+forced tool choice. Server-side refusal fallbacks are on by default
+(`fallbacks="default"`; pass `fallbacks=None` to turn them off).
 
 ## Add a tool
 
