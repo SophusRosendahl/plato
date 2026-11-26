@@ -65,8 +65,7 @@ def test_hello_cli_answers_and_takes_follow_ups_mid_thought(tmp_path):
     proc.stdin.write("and a follow-up\n")
     proc.stdin.flush()
     time.sleep(5)
-    proc.stdin.close()
-    out = proc.communicate(timeout=10)[0]
+    out = proc.communicate(timeout=10)[0]  # closes stdin itself (closing it first breaks on 3.12)
     assert "I read: “hello there”" in out
     assert "Also got: “and a follow-up”" in out                      # joined the same wake
     assert out.count("awake") == 1
